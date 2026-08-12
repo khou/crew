@@ -34,6 +34,18 @@ the expensive model plans and reviews while a cheaper one implements:
 
 Change any of it in `~/.config/crew/crew.json`.
 
+## What it notices without being asked
+
+- A worker that **claims to be working but is not**. Its screen going unchanged
+  for `stall_minutes` (default 15) while it still reports `running` marks it
+  `stalled`. Spinners, clocks and elapsed-time counters are stripped before
+  comparing, so thinking does not read as stuck.
+- A worker that has **run out of plan allowance**. crew then refuses to spawn
+  more workers on that agent, because they all share one subscription and
+  starting three more spends nothing while hiding the problem.
+- A worker that **died, or never started**. State comes from the terminal, not
+  from the worker reporting in, so a crash still shows up truthfully.
+
 ## crew-reap
 
 Coding agents create a git worktree per session and none of them clean up.

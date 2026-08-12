@@ -1,0 +1,4 @@
+#!/bin/bash
+echo "fake-agent ready · ? for shortcuts"
+echo "You have reached your usage limit. Resets at 3pm."
+while true; do sleep 5; done

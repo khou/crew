@@ -17,6 +17,7 @@ Nothing here runs in the background. Each command does one thing and exits.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -118,7 +119,24 @@ DEFAULTS = {
     "roles": {},           # merged over DEFAULT_ROLES
     "ready_timeout": 90,   # seconds to wait for a worker to reach its prompt
     "max_workers": 4,      # 0 means no limit
+    # A worker whose screen has not changed in this long, while it still
+    # claims to be working, is stuck rather than thinking. Fractions are
+    # allowed. 0 disables the check.
+    "stall_minutes": 15,
 }
+
+# Signs a session has run out of plan allowance. Deliberately broad, because
+# every agent words this differently and the cost of missing it is a director
+# that keeps spawning workers onto an exhausted account.
+#
+# These are heuristics. They have not been checked against a real exhaustion
+# event for every agent, so treat a match as a strong hint and a non-match as
+# no information. Extend per agent with an "exhausted" list in config.
+QUOTA_PATTERNS = [
+    r"usage limit", r"rate limit", r"quota", r"limit reached",
+    r"out of (credits|tokens)", r"upgrade your plan",
+    r"resets? (at|in) ", r"too many requests",
+]
 
 
 def log(msg=""):
@@ -371,10 +389,18 @@ def cmd_spawn(args, cfg):
     if not spec:
         die(f"role {args.role} uses unknown agent {role['agent']}")
 
-    limit = cfg["max_workers"]
     sessions = hook_sessions()
-    live = [w for w in workers().values()
-            if worker_state(w, sessions)[0] not in ("gone",)]
+    seen = refresh(workers(), sessions, cfg)
+    exhausted = sorted({w["agent"] for _n, (st, w) in seen.items()
+                        if st == "quota"})
+    if role["agent"] in exhausted:
+        die(f"{role['agent']} looks out of plan allowance: another worker is "
+            f"showing a limit message. Spawning more spends nothing and hides "
+            f"the problem. Check that worker, or use a role on a different "
+            f"agent.", 1)
+
+    limit = cfg["max_workers"]
+    live = [w for _n, (st, w) in seen.items() if st != "gone"]
     if limit and len(live) >= limit:
         die(f"{len(live)} workers already running, limit is {limit}. "
             "Raise max_workers or reap one first.", 1)
@@ -501,10 +527,16 @@ def await_ready(ws, surface, spec, timeout):
     """Wait until the agent is at its prompt, or say why it will never be."""
     ready = [re.compile(p) for p in spec["ready"]]
     blocked = [re.compile(p) for p in spec["blocked"]]
+    quota = [re.compile(p, re.I) for p in (spec.get("exhausted") or QUOTA_PATTERNS)]
     deadline = time.time() + timeout
     screen = ""
     while time.time() < deadline:
         screen = read_screen(ws, surface, 40)
+        for pat in quota:
+            if pat.search(screen):
+                return "quota", (
+                    "it started but is reporting a plan limit "
+                    f"(matched {pat.pattern!r}). Nothing was typed at it.")
         for pat in blocked:
             if pat.search(screen):
                 return "blocked", (
@@ -553,8 +585,9 @@ def cmd_status(args, cfg):
         log("no workers")
         return 0
     log(f"{'worker':28} {'role':10} {'agent':8} {'state':10} where")
-    for name, w in sorted(all_w.items()):
-        state, s = worker_state(w, sessions)
+    seen = refresh(all_w, sessions, cfg)
+    for name, (state, w) in sorted(seen.items()):
+        s = sessions.get(w["surface"], {})
         # The agent may have moved itself into a worktree it created, so
         # trust what it reports over what crew asked for.
         actual = s.get("cwd") or w.get("cwd", "")
@@ -563,12 +596,31 @@ def cmd_status(args, cfg):
         except ValueError:
             where = actual
         log(f"{name:28} {w['role']:10} {w['agent']:8} {state:10} {where}")
-    waiting = [n for n, w in all_w.items()
-               if sessions.get(w["surface"], {}).get("state") == "needsInput"]
-    if waiting:
-        log("")
-        log(f"waiting on you: {', '.join(waiting)}")
+    for label, note in (
+        ("needsInput", "waiting on you"),
+        ("stalled", "no visible progress, check or restart"),
+        ("quota", "plan allowance looks exhausted"),
+    ):
+        names = [n for n, (st, _) in seen.items() if st == label]
+        if names:
+            log(f"\n{note}: {', '.join(sorted(names))}")
     return 0
+
+
+def screen_fingerprint(text):
+    """What the screen looks like, ignoring what changes on its own.
+
+    Clocks, spinners and elapsed-time counters tick without any work
+    happening, so they are stripped before comparing. Otherwise nothing would
+    ever look stalled.
+    """
+    text = re.sub(r"\d+(\.\d+)?\s*(s|ms|m|h)\b", "", text)
+    text = re.sub(r"\d{1,2}:\d{2}(:\d{2})?", "", text)
+    text = re.sub(r"[·✻✳✽*|/\\-]+", "", text)
+    # A stable digest, not hash(): Python randomises string hashing per
+    # process, and every crew command is a new process, so hash() would make
+    # an unchanged screen look different every single time.
+    return hashlib.sha1(" ".join(text.split()).encode()).hexdigest()
 
 
 def worker_state(w, sessions):
@@ -587,6 +639,40 @@ def worker_state(w, sessions):
     return s.get("state", "unknown"), s
 
 
+def refresh(all_w, sessions, cfg):
+    """Sample every worker once, and note stalls and exhausted plans.
+
+    Each crew command is a separate process, so "has anything changed since
+    last time" has to be written down rather than remembered.
+    """
+    now = time.time()
+    stall_seconds = cfg["stall_minutes"] * 60
+    out = {}
+    for name, w in all_w.items():
+        state, s = worker_state(w, sessions)
+        spec = cfg["agents"].get(w["agent"], {})
+        patterns = list(spec.get("exhausted") or QUOTA_PATTERNS)
+
+        screen = ""
+        if state not in ("gone",):
+            screen = read_screen(w["workspace"], w["surface"], 40)
+
+        if screen and any(re.search(p, screen, re.I) for p in patterns):
+            state = "quota"
+
+        if screen:
+            fp = screen_fingerprint(screen)
+            if fp != w.get("fp"):
+                w["fp"] = fp
+                w["fp_at"] = now
+                put_worker(name, w)
+            elif (state == "running" and stall_seconds
+                  and now - w.get("fp_at", now) > stall_seconds):
+                state = "stalled"
+        out[name] = (state, w)
+    return out
+
+
 def cmd_wait(args, cfg):
     """Block until a worker needs the director, then say which and why.
 
@@ -595,7 +681,7 @@ def cmd_wait(args, cfg):
     anything has changed since the last call, so a worker that finished while
     the director was busy is reported immediately rather than waited on.
     """
-    interesting = {"idle", "needsInput", "gone"}
+    interesting = {"idle", "needsInput", "gone", "stalled", "quota"}
     deadline = time.time() + args.timeout
     first = True
     while True:
@@ -605,8 +691,7 @@ def cmd_wait(args, cfg):
             return 0
         sessions = hook_sessions()
         changed = []
-        for name, w in sorted(all_w.items()):
-            state, _ = worker_state(w, sessions)
+        for name, (state, w) in sorted(refresh(all_w, sessions, cfg).items()):
             if state != w.get("seen") and state in interesting:
                 changed.append((name, state, w))
         if changed:

@@ -20,6 +20,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -66,11 +67,16 @@ class LiveTest(unittest.TestCase):
         self.write_config({
             "agents": {"fake": fake("fake-agent"),
                        "fakelogin": fake("fake-agent-login"),
-                       "fakecrash": fake("fake-agent-crash")},
+                       "fakecrash": fake("fake-agent-crash"),
+                       "fakestall": fake("fake-agent-stalled"),
+                       "fakequota": fake("fake-agent-quota")},
             "roles": {"f": {"agent": "fake", "permission": "edit"},
                       "flogin": {"agent": "fakelogin", "permission": "edit"},
-                      "fcrash": {"agent": "fakecrash", "permission": "edit"}},
+                      "fcrash": {"agent": "fakecrash", "permission": "edit"},
+                      "fstall": {"agent": "fakestall", "permission": "edit"},
+                      "fquota": {"agent": "fakequota", "permission": "edit"}},
             "ready_timeout": 25,
+            "stall_minutes": 0.02,   # ~1.2s, so a test can trip it
         })
 
     def tearDown(self):
@@ -208,6 +214,55 @@ class LiveTest(unittest.TestCase):
         self.assertEqual(p.returncode, 1, "a refused spawn should exit non-zero")
         self.assertIn("limit is 1", p.stdout)
         self.assertNotIn("w14", self.workers(), "a refused worker was recorded")
+
+    def test_a_worker_making_no_progress_is_reported_as_stalled(self):
+        # Running is not the same as working. A wedged agent keeps saying it
+        # is busy, so the screen has to be the evidence.
+        self.crew("spawn", "fstall", "spin", "--name", "s1", "--no-task")
+        self.fake_session("s1", "running")
+        self.crew("status")           # first sample records the screen
+        time.sleep(2)
+        p = self.crew("status")       # unchanged since, and still "running"
+        self.assertIn("stalled", p.stdout)
+        self.assertIn("no visible progress", p.stdout)
+
+    def test_a_busy_worker_is_not_called_stalled(self):
+        self.crew("spawn", "f", "work", "--name", "s2", "--no-task")
+        self.fake_session("s2", "running")
+        self.crew("status")
+        time.sleep(2)
+        self.crew("say", "s2", "progress", "--now")   # screen changes
+        p = self.crew("status")
+        self.assertNotIn("stalled", p.stdout)
+
+    def test_a_worker_reporting_a_plan_limit_is_flagged(self):
+        self.crew("spawn", "fquota", "anything", "--name", "q1", "--no-task")
+        p = self.crew("status")
+        self.assertIn("quota", p.stdout)
+        self.assertIn("plan allowance", p.stdout)
+
+    def test_spawn_refuses_to_pile_onto_an_exhausted_agent(self):
+        # The failure this prevents: a director reacting to a stuck worker by
+        # starting three more on the same exhausted account.
+        self.crew("spawn", "fquota", "one", "--name", "q2", "--no-task")
+        p = self.crew("spawn", "fquota", "two", "--name", "q3", "--no-task")
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("out of plan allowance", p.stdout)
+        self.assertNotIn("q3", self.workers())
+
+    def test_a_different_agent_is_still_allowed_when_one_is_exhausted(self):
+        self.crew("spawn", "fquota", "one", "--name", "q4", "--no-task")
+        p = self.crew("spawn", "f", "two", "--name", "q5", "--no-task")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+
+    def test_wait_wakes_for_a_stall(self):
+        self.crew("spawn", "fstall", "spin", "--name", "s3", "--no-task")
+        self.fake_session("s3", "running")
+        self.crew("status")
+        time.sleep(2)
+        p = self.crew("wait", "--timeout", "10", "--poll", "0.5")
+        self.assertIn("s3", p.stdout)
+        self.assertIn("stalled", p.stdout)
 
     def test_worktree_is_created_for_agents_that_cannot_make_their_own(self):
         self.crew("spawn", "f", "thing", "--name", "w15", "--no-task")

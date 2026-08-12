@@ -1,0 +1,4 @@
+#!/bin/bash
+# Reaches its prompt, then never changes again: the shape of a wedged agent.
+echo "fake-agent ready · ? for shortcuts"
+while true; do sleep 5; done

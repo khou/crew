@@ -30,6 +30,8 @@ picture instead of just what changed.
 | `idle` | finished its turn | review the work, or give it the next piece |
 | `needsInput` | waiting for a human | read its tab, answer it, or pass the question on |
 | `gone` | the process has exited | check the tab for why, then reap |
+| `stalled` | claims to be working but its screen has not changed | read the tab; restart it or give it a smaller piece |
+| `quota` | showing a plan-limit message | stop spawning on that agent, tell the human |
 
 ## Choosing a role
 
@@ -67,6 +69,17 @@ your job to pass along. Nothing else will.
 **Reap when a piece is done.** Every worker leaves a worktree behind. `crew
 reap` commits anything uncommitted to its branch first, so reaping never
 destroys work, but it will not touch a worktree that is still in use.
+
+**Running is not working.** A wedged agent keeps reporting that it is busy.
+crew calls it `stalled` once its screen has gone unchanged for long enough,
+ignoring spinners and clocks. Treat a stall as a task that was too big or too
+vague, not as a reason to wait longer.
+
+**One exhausted agent exhausts them all.** Workers share one subscription, so
+when a plan limit is hit, every worker on that agent hits it. crew refuses to
+spawn more onto an agent already reporting a limit. Switch to a role on a
+different agent, or tell the human. Note the limit patterns are heuristics: a
+match is a strong hint, a non-match tells you nothing.
 
 **Surface questions, do not invent answers.** When a worker needs a decision the
 human should make, ask the human. Guessing produces work that gets thrown away.
