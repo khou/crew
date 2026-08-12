@@ -1,0 +1,643 @@
+#!/usr/bin/env python3
+"""crew: run a fleet of coding-agent sessions as tabs in one cmux workspace.
+
+One session is the director. It spawns workers, gives them work, watches their
+state, and cleans up after them. Workers are ordinary interactive sessions in
+ordinary terminal tabs, signed in as you, so they use your subscription rather
+than an API key.
+
+  crew doctor              check every configured agent can actually start
+  crew spawn <role> <task> open a worker tab and wait until it is ready
+  crew status              what every worker is doing
+  crew say <worker> <text> deliver a message, safely
+  crew reap                remove finished worktrees (see crew-reap)
+
+Nothing here runs in the background. Each command does one thing and exits.
+"""
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+HOME = os.path.expanduser("~")
+CONFIG_PATH = os.environ.get(
+    "CREW_CONFIG", os.path.join(HOME, ".config", "crew", "crew.json"))
+STATE_PATH = os.environ.get(
+    "CREW_STATE", os.path.join(HOME, ".local", "state", "crew", "workers.json"))
+
+REQUIRED_BINARIES = ("git", "cmux")
+
+# How each agent is launched and how we know it started.
+#
+# Placeholders: {model} {effort} {worktree} {cwd} {name}. An argument
+# containing a placeholder whose value is empty is dropped, so a role without
+# an effort level simply omits the flag.
+#
+# ready:   the session is at its own prompt and can be given work.
+# blocked: it is showing something a human must resolve. Never type at these.
+#          A login screen especially: sending a key starts a browser sign-in
+#          flow, and interrupting that can clear the stored credentials.
+AGENTS = {
+    "claude": {
+        "bin": "claude",
+        # Makes its own worktree, which is also the only way to avoid the
+        # trust dialog: a directory Claude created is trusted automatically.
+        "worktree": "self",
+        "args": ["--worktree", "{worktree}", "--model", "{model}",
+                 "--effort", "{effort}", "--name", "{name}"],
+        "permission": {
+            "plan": ["--permission-mode", "plan"],
+            "edit": ["--permission-mode", "acceptEdits"],
+            "full": ["--permission-mode", "bypassPermissions"],
+        },
+        "ready": [r"shift\+tab to cycle", r"for shortcuts"],
+        "blocked": [r"Yes, I trust this folder", r"Workspace trust not yet accepted",
+                    r"Press any key to log in", r"/login", r"Invalid API key"],
+    },
+    "codex": {
+        "bin": "codex",
+        # No worktree flag, so crew makes one. Codex then wants the directory
+        # trusted, granted per invocation rather than by editing its config.
+        "worktree": "crew",
+        # --approve-for-me already implies the workspace-write sandbox, and
+        # codex rejects both together.
+        "args": ["-m", "{model}",
+                 "-c", 'model_reasoning_effort="{effort}"',
+                 "-c", 'projects."{cwd}".trust_level="trusted"'],
+        "permission": {
+            "plan": ["--sandbox", "read-only", "--ask-for-approval", "never"],
+            "edit": ["--approve-for-me"],
+            "full": ["--dangerously-bypass-approvals-and-sandbox"],
+        },
+        "ready": [r"for shortcuts", r"Run /review"],
+        "blocked": [r"Do you trust the contents of this directory",
+                    r"codex login", r"Not logged in"],
+    },
+    "cursor": {
+        "bin": "cursor-agent",
+        "worktree": "self",
+        "args": ["--worktree", "{worktree}", "--model", "{model}", "--trust"],
+        "permission": {
+            "plan": ["--mode", "plan"],
+            "edit": ["--auto-review"],
+            "full": ["--force"],
+        },
+        # An API key in the environment silently overrides the signed-in
+        # account, which moves the work onto usage billing instead of the
+        # plan. Workers are meant to spend the subscription.
+        "env_unset": ["CURSOR_API_KEY"],
+        "ready": [r"Plan, search, build anything", r"Add a follow-up"],
+        "blocked": [r"Press any key to log in", r"Workspace Trust Required",
+                    r"agent login"],
+    },
+}
+
+# permission is a crew-level intent, mapped to each agent's own vocabulary:
+#   plan  read and think, change nothing
+#   edit  change files inside its own worktree without asking
+#   full  no restrictions at all
+DEFAULT_ROLES = {
+    "planner":  {"agent": "claude", "model": "opus",   "effort": "max",
+                 "permission": "plan"},
+    "worker":   {"agent": "claude", "model": "sonnet", "effort": "medium",
+                 "permission": "edit"},
+    "reviewer": {"agent": "claude", "model": "opus",   "effort": "high",
+                 "permission": "plan"},
+}
+
+DEFAULTS = {
+    "agents": {},          # merged over AGENTS
+    "roles": {},           # merged over DEFAULT_ROLES
+    "ready_timeout": 90,   # seconds to wait for a worker to reach its prompt
+    "max_workers": 4,      # 0 means no limit
+}
+
+
+def log(msg=""):
+    print(msg, flush=True)
+
+
+def die(msg, code=2):
+    log(msg)
+    sys.exit(code)
+
+
+def run(args, cwd=None, timeout=120, env=None):
+    try:
+        p = subprocess.run(args, cwd=cwd, timeout=timeout, env=env,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           text=True)
+    except subprocess.TimeoutExpired:
+        return 124, ""
+    except OSError as e:
+        return 127, str(e)
+    return p.returncode, p.stdout.strip()
+
+
+def load_json(path, default):
+    try:
+        with open(path) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return default
+
+
+def save_json(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(data, fh, indent=2)
+    os.replace(tmp, path)
+
+
+def config():
+    cfg = dict(DEFAULTS)
+    cfg.update(load_json(CONFIG_PATH, {}))
+    agents = {k: dict(v) for k, v in AGENTS.items()}
+    for name, override in (cfg.get("agents") or {}).items():
+        agents.setdefault(name, {}).update(override)
+    cfg["agents"] = agents
+    roles = {k: dict(v) for k, v in DEFAULT_ROLES.items()}
+    for name, override in (cfg.get("roles") or {}).items():
+        roles.setdefault(name, {}).update(override)
+    cfg["roles"] = roles
+    return cfg
+
+
+# --- cmux -----------------------------------------------------------------
+
+def cmux(*args, timeout=60):
+    env = dict(os.environ, CMUX_QUIET="1")
+    return run(["cmux", *args], timeout=timeout, env=env)
+
+
+def caller_context():
+    """The director's own workspace and pane, so workers land beside it."""
+    rc, out = cmux("identify", "--json")
+    if rc != 0:
+        die("cmux is not answering. Is it running, and is this a cmux terminal?")
+    try:
+        caller = json.loads(out)["caller"]
+    except (ValueError, KeyError):
+        die("could not read the caller context from cmux identify")
+    ws = os.environ.get("CMUX_WORKSPACE_ID")
+    pane = uuid_for(caller["pane_ref"], "pane")
+    if not ws or not pane:
+        die("run crew from inside a cmux terminal tab")
+    return ws, pane
+
+
+def uuid_for(ref, kind):
+    """Short refs resolve differently across cmux verbs, so always use UUIDs."""
+    rc, out = cmux("tree", "--all", "--id-format", "both")
+    if rc != 0:
+        return None
+    for line in out.splitlines():
+        if f"{ref} " in line:
+            m = re.search(r"[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}",
+                          line)
+            if m:
+                return m.group(0)
+    return None
+
+
+def read_screen(ws, surface, lines=40):
+    rc, out = cmux("read-screen", "--workspace", ws, "--surface", surface,
+                   "--lines", str(lines))
+    return out if rc == 0 else ""
+
+
+# --- agents ---------------------------------------------------------------
+
+# The PATH a pane command starts with: the pane's own shim directory, then
+# almost nothing. Login files add the rest, but only some of it.
+PANE_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+
+
+def resolve_launch(name):
+    """How to invoke an agent from inside a worker's pane.
+
+    Returns the bare name when a login shell in the pane will find it, and an
+    absolute path only when it will not.
+
+    Preferring the bare name is not laziness. cmux puts a per-pane wrapper
+    early on each pane's PATH, and for some agents that wrapper is what
+    installs the hooks reporting the session back to cmux. Resolving to an
+    absolute path here would hand every worker the *director's* wrapper, which
+    belongs to a different pane and disappears with it.
+    """
+    env = dict(os.environ, PATH=PANE_PATH)
+    rc, out = run(["/bin/zsh", "-lc", f"command -v {name}"], timeout=30, env=env)
+    if rc == 0 and out.strip():
+        return name, "pane PATH"
+    found = shutil.which(name)
+    if not found:
+        rc, out = run(["/bin/zsh", "-ilc", f"command -v {name}"], timeout=30)
+        found = out.splitlines()[-1].strip() if rc == 0 and out.strip() else None
+    if found and os.path.exists(found):
+        return os.path.realpath(found), "absolute path"
+    return None, "not found"
+
+
+def build_argv(spec, binary, subs):
+    argv = [binary]
+    for arg in spec["args"]:
+        filled = arg
+        drop = False
+        for key, val in subs.items():
+            token = "{" + key + "}"
+            if token in filled:
+                if not val:
+                    drop = True
+                    break
+                filled = filled.replace(token, str(val))
+        if not drop:
+            argv.append(filled)
+    return prune_orphan_flags(argv, spec)
+
+
+def prune_orphan_flags(argv, spec):
+    """Drop a flag whose value was dropped for being empty."""
+    out, i = [], 0
+    placeholders = {a: b for a, b in zip(spec["args"], spec["args"][1:])}
+    while i < len(argv):
+        cur = argv[i]
+        nxt = argv[i + 1] if i + 1 < len(argv) else None
+        expects_value = cur.startswith("-") and placeholders.get(cur, "").count("{") == 1
+        if expects_value and (nxt is None or nxt.startswith("-")):
+            i += 1
+            continue
+        out.append(cur)
+        i += 1
+    return out
+
+
+# --- worker state ---------------------------------------------------------
+
+def workers():
+    return load_json(STATE_PATH, {})
+
+
+def put_worker(name, data):
+    all_w = workers()
+    all_w[name] = data
+    save_json(STATE_PATH, all_w)
+
+
+def drop_worker(name):
+    all_w = workers()
+    all_w.pop(name, None)
+    save_json(STATE_PATH, all_w)
+
+
+def hook_sessions():
+    """Live agent sessions cmux knows about, keyed by surface id.
+
+    cmux normalises this across every agent it integrates, which is what makes
+    one status view possible without per-agent code.
+    """
+    out = {}
+    hooks = os.path.join(HOME, ".cmuxterm")
+    if not os.path.isdir(hooks):
+        return out
+    for fn in os.listdir(hooks):
+        if not fn.endswith("-hook-sessions.json"):
+            continue
+        agent = fn.split("-hook-sessions.json")[0]
+        data = load_json(os.path.join(hooks, fn), {})
+        for s in (data.get("sessions") or {}).values():
+            sid = s.get("surfaceId")
+            if not sid:
+                continue
+            prev = out.get(sid)
+            if prev and prev.get("updatedAt", 0) > s.get("updatedAt", 0):
+                continue
+            out[sid] = {"agent": agent, "state": s.get("agentLifecycle", "unknown"),
+                        "pid": s.get("pid"), "cwd": s.get("cwd"),
+                        "updatedAt": s.get("updatedAt", 0)}
+    return out
+
+
+def pid_alive(pid):
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+# --- commands -------------------------------------------------------------
+
+def cmd_doctor(args, cfg):
+    log(f"{'agent':10} {'launched as':40} {'found via':14} {'worktree':9} version")
+    problems = 0
+    for name, spec in sorted(cfg["agents"].items()):
+        launch_as, how = resolve_launch(spec["bin"])
+        if not launch_as:
+            log(f"{name:10} {'(not found)':40} {'-':14} {spec['worktree']:9} missing")
+            problems += 1
+            continue
+        probe = launch_as if os.path.isabs(launch_as) else shutil.which(spec["bin"])
+        rc, ver = run([probe, "--version"], timeout=30) if probe else (1, "")
+        ver = ver.splitlines()[0][:34] if rc == 0 and ver else "no --version"
+        log(f"{name:10} {launch_as:40} {how:14} {spec['worktree']:9} {ver}")
+    log("")
+    for role, r in sorted(cfg["roles"].items()):
+        agent = r.get("agent")
+        mark = "ok" if agent in cfg["agents"] else "UNKNOWN AGENT"
+        log(f"role {role:10} -> {agent} {r.get('model','')} {r.get('effort','')} {mark}")
+        if mark != "ok":
+            problems += 1
+    log("")
+    log("doctor checks that agents exist and report a version. It cannot tell "
+        "whether they are signed in;\nthat only shows up at spawn, which fails "
+        "loudly if a worker lands on a login screen.")
+    return 1 if problems else 0
+
+
+def cmd_spawn(args, cfg):
+    role = cfg["roles"].get(args.role)
+    if not role:
+        die(f"unknown role {args.role}. Known: {', '.join(sorted(cfg['roles']))}")
+    spec = cfg["agents"].get(role["agent"])
+    if not spec:
+        die(f"role {args.role} uses unknown agent {role['agent']}")
+
+    limit = cfg["max_workers"]
+    live = [w for w in workers().values() if pid_alive(w.get("pid"))]
+    if limit and len(live) >= limit:
+        die(f"{len(live)} workers already running, limit is {limit}. "
+            "Raise max_workers or reap one first.", 1)
+
+    binary, _how = resolve_launch(spec["bin"])
+    if not binary:
+        die(f"{spec['bin']} is not on PATH and no login shell could find it")
+
+    repo = os.path.realpath(args.cwd or os.getcwd())
+    rc, top = run(["git", "-C", repo, "rev-parse", "--show-toplevel"])
+    if rc != 0:
+        die(f"{repo} is not a git repository")
+    repo = os.path.realpath(top)
+
+    name = args.name or f"{args.role}-{slug(args.task)[:24]}"
+    if name in workers():
+        die(f"a worker called {name} already exists")
+
+    # Who owns the worktree decides where the agent starts.
+    if spec["worktree"] == "crew":
+        wt = os.path.join(repo, ".crew", "worktrees", name)
+        if not os.path.exists(wt):
+            rc, out = run(["git", "-C", repo, "worktree", "add", "-q", wt,
+                           "-b", f"crew/{name}"])
+            if rc != 0:
+                die(f"could not create a worktree: {out}")
+        cwd = wt
+    else:
+        cwd = repo  # the agent makes its own and moves itself there
+
+    ws, pane = caller_context()
+    surface = new_tab(ws, pane, cwd)
+    title = f"{args.role} · {role['agent']} · {args.task[:40]}"
+    cmux("rename-tab", "--workspace", ws, "--surface", surface, title)
+
+    subs = {"model": role.get("model", ""), "effort": role.get("effort", ""),
+            "worktree": name, "cwd": cwd, "name": name}
+    argv = build_argv(spec, binary, subs)
+    level = role.get("permission", "edit")
+    modes = spec.get("permission") or {}
+    if level not in modes:
+        die(f"agent {role['agent']} has no '{level}' permission mode. "
+            f"Known: {', '.join(sorted(modes)) or 'none'}")
+    argv += modes[level]
+    launch(ws, surface, cwd, argv, spec)
+
+    put_worker(name, {"role": args.role, "agent": role["agent"], "task": args.task,
+                      "surface": surface, "workspace": ws, "repo": repo,
+                      "cwd": cwd, "argv": argv, "started": int(time.time())})
+
+    state, detail = await_ready(ws, surface, spec, cfg["ready_timeout"])
+    if state != "ready":
+        log(f"worker {name} did not start: {detail}")
+        log(f"  its tab is still open so you can see what happened: {title}")
+        return 1
+
+    log(f"worker {name} ready in {os.path.relpath(cwd, repo) or '.'}")
+    if args.task and not args.no_task:
+        ok, why = deliver(ws, surface, args.task, spec)
+        log(f"  task delivered" if ok else f"  task NOT delivered: {why}")
+        return 0 if ok else 1
+    return 0
+
+
+def slug(text):
+    return re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-") or "task"
+
+
+def new_tab(ws, pane, cwd):
+    rc, out = cmux("new-surface", "--workspace", ws, "--pane", pane,
+                   "--working-directory", cwd, "--focus", "false")
+    if rc != 0:
+        die(f"could not open a tab: {out}")
+    m = re.search(r"surface:(\d+)", out)
+    if not m:
+        die(f"cmux did not return a surface: {out}")
+    time.sleep(0.5)
+    surface = uuid_for(f"surface:{m.group(1)}", "surface")
+    if not surface:
+        die("could not resolve the new tab to a stable id")
+    return surface
+
+
+def launch(ws, surface, cwd, argv, spec):
+    """Start the agent, keeping the tab alive whatever happens.
+
+    A pane whose command exits is closed by cmux, so a worker that dies on
+    startup would vanish with its error message. The trailing shell keeps the
+    evidence on screen.
+    """
+    quoted = " ".join(shell_quote(a) for a in argv)
+    unset = "".join(f"unset {v}; " for v in spec.get("env_unset", []))
+    inner = (f'export PATH="$PATH:{inherited_path()}"; {unset}'
+             f"cd {shell_quote(cwd)} || exit 1; {quoted}; "
+             f"printf '\\n[crew] agent exited with status %s\\n' \"$?\"; "
+             f"exec /bin/zsh -i")
+    # Deliberately not a login shell. A login shell rebuilds PATH and the
+    # pane's own wrapper loses to the real binary, which costs the worker its
+    # cmux hooks and makes it invisible to `crew status`.
+    rc, out = cmux("respawn-pane", "--workspace", ws, "--surface", surface,
+                   "--command", f"exec /bin/zsh -c {shell_quote(inner)}")
+    if rc != 0:
+        die(f"could not start the agent: {out}")
+
+
+def inherited_path():
+    """The user's PATH, minus per-pane wrapper directories.
+
+    A pane starts with its own wrapper directory first and little else. That
+    wrapper must keep winning, so it is left in front and this is appended
+    behind it. Another pane's wrapper directory would shadow it, so those are
+    stripped: they belong to a different session and vanish with it.
+    """
+    parts = [p for p in os.environ.get("PATH", "").split(":")
+             if p and "cmux-cli-shims" not in p]
+    return ":".join(parts)
+
+
+def shell_quote(s):
+    return "'" + str(s).replace("'", "'\\''") + "'"
+
+
+def await_ready(ws, surface, spec, timeout):
+    """Wait until the agent is at its prompt, or say why it will never be."""
+    ready = [re.compile(p) for p in spec["ready"]]
+    blocked = [re.compile(p) for p in spec["blocked"]]
+    deadline = time.time() + timeout
+    screen = ""
+    while time.time() < deadline:
+        screen = read_screen(ws, surface, 40)
+        for pat in blocked:
+            if pat.search(screen):
+                return "blocked", (
+                    f"it is showing something only you can answer "
+                    f"({pat.pattern}). Nothing was typed at it.")
+        if "[crew] agent exited with status" in screen:
+            last = [l for l in screen.splitlines() if l.strip()][-3:]
+            return "exited", "the agent exited: " + " | ".join(last)
+        if any(p.search(screen) for p in ready):
+            return "ready", ""
+        time.sleep(2)
+    tail = [l for l in screen.splitlines() if l.strip()][-2:]
+    return "timeout", f"no prompt after {timeout}s. Last output: {' | '.join(tail)}"
+
+
+def deliver(ws, surface, text, spec):
+    """Type a message and submit it, only once it is known to have landed.
+
+    cmux send types without submitting, so this is two calls. Between them we
+    check the text actually reached the agent's composer. If the agent died
+    the tab is a shell prompt, and submitting there would run the message as
+    a command.
+    """
+    one_line = " ".join(text.split())
+    rc, out = cmux("send", "--workspace", ws, "--surface", surface, one_line)
+    if rc != 0:
+        return False, f"cmux send failed: {out}"
+    time.sleep(0.4)
+    screen = read_screen(ws, surface, 40)
+    probe = one_line[:24]
+    if probe and probe not in " ".join(screen.split()):
+        cmux("send-key", "--workspace", ws, "--surface", surface, "ctrl+u")
+        return False, "the text did not appear in the agent's prompt, so it was " \
+                      "not submitted. The session may have exited."
+    if any(re.search(p, screen) for p in spec["blocked"]):
+        cmux("send-key", "--workspace", ws, "--surface", surface, "ctrl+u")
+        return False, "the session is showing a prompt only you can answer"
+    rc, out = cmux("send-key", "--workspace", ws, "--surface", surface, "enter")
+    return (rc == 0), (out if rc != 0 else "")
+
+
+def cmd_status(args, cfg):
+    sessions = hook_sessions()
+    all_w = workers()
+    if not all_w:
+        log("no workers")
+        return 0
+    log(f"{'worker':28} {'role':10} {'agent':8} {'state':10} where")
+    for name, w in sorted(all_w.items()):
+        s = sessions.get(w["surface"], {})
+        state = s.get("state", "unknown")
+        if state == "unknown" and not pid_alive(s.get("pid")):
+            state = "gone"
+        # The agent may have moved itself into a worktree it created, so
+        # trust what it reports over what crew asked for.
+        actual = s.get("cwd") or w.get("cwd", "")
+        try:
+            where = os.path.relpath(actual, w.get("repo", "")) or "."
+        except ValueError:
+            where = actual
+        log(f"{name:28} {w['role']:10} {w['agent']:8} {state:10} {where}")
+    waiting = [n for n, w in all_w.items()
+               if sessions.get(w["surface"], {}).get("state") == "needsInput"]
+    if waiting:
+        log("")
+        log(f"waiting on you: {', '.join(waiting)}")
+    return 0
+
+
+def cmd_say(args, cfg):
+    w = workers().get(args.worker)
+    if not w:
+        die(f"no worker called {args.worker}")
+    spec = cfg["agents"][w["agent"]]
+    sessions = hook_sessions()
+    s = sessions.get(w["surface"], {})
+    if s and not pid_alive(s.get("pid")):
+        die(f"{args.worker} is not running. Its tab is still open.", 1)
+    if s.get("state") == "running" and not args.now:
+        die(f"{args.worker} is mid-turn. Wait for idle, or pass --now to interrupt.", 1)
+    if args.now and s.get("state") == "running":
+        cmux("send-key", "--workspace", w["workspace"], "--surface", w["surface"],
+             "escape")
+        time.sleep(1)
+    ok, why = deliver(w["workspace"], w["surface"], args.message, spec)
+    if not ok:
+        die(f"not delivered: {why}", 1)
+    log(f"delivered to {args.worker}")
+    return 0
+
+
+def cmd_reap(args, cfg):
+    reaper = os.path.join(os.path.dirname(os.path.abspath(__file__)), "crew-reap")
+    os.execv(reaper, [reaper, *args.rest])
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("doctor", help="check every agent can start")
+
+    sp = sub.add_parser("spawn", help="open a worker tab and wait for it")
+    sp.add_argument("role")
+    sp.add_argument("task")
+    sp.add_argument("--name")
+    sp.add_argument("--cwd")
+    sp.add_argument("--no-task", action="store_true",
+                    help="start the worker but do not send the task")
+
+    sub.add_parser("status", help="what every worker is doing")
+
+    sy = sub.add_parser("say", help="deliver a message to a worker")
+    sy.add_argument("worker")
+    sy.add_argument("message")
+    sy.add_argument("--now", action="store_true",
+                    help="interrupt a running turn instead of refusing")
+
+    rp = sub.add_parser("reap", help="remove finished worktrees")
+    rp.add_argument("rest", nargs=argparse.REMAINDER)
+
+    args = ap.parse_args()
+
+    if args.cmd != "reap":
+        missing = [b for b in REQUIRED_BINARIES if shutil.which(b) is None]
+        if missing:
+            die(f"crew needs {' and '.join(missing)} on PATH")
+
+    cfg = config()
+    return {
+        "doctor": cmd_doctor, "spawn": cmd_spawn, "status": cmd_status,
+        "say": cmd_say, "reap": cmd_reap,
+    }[args.cmd](args, cfg)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)

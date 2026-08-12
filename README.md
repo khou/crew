@@ -1,7 +1,43 @@
 # crew
 
+Run a fleet of coding-agent sessions as tabs in one terminal window, driven by
+another coding-agent session.
+
+One session is the director. It spawns workers, gives them work, watches their
+state, and cleans up after them. Workers are ordinary interactive sessions
+signed in as you, so they spend your subscription rather than an API key. Any
+of Claude Code, Codex, or Cursor can be the director, and any can be a worker,
+in any combination.
+
+```sh
+crew doctor                            # can every agent actually start
+crew spawn worker "add the retry path" # open a worker tab, wait until ready
+crew status                            # who is working, idle, or stuck
+crew say worker-add-the "also cover timeouts"
+crew reap --apply                      # remove finished worktrees
+```
+
+Requires [cmux](https://cmux.com). See [docs/DIRECTOR.md](docs/DIRECTOR.md) for
+the instructions to hand a session so it acts as the director.
+
+## Why a director helps
+
+Roles pair an agent with a model, an effort level, and a permission level, so
+the expensive model plans and reviews while a cheaper one implements:
+
+| role | agent | permission |
+|---|---|---|
+| `planner` | your best model, maximum effort | read only |
+| `worker` | a cheaper model | edits inside its own worktree |
+| `reviewer` | your best model | read only |
+
+Change any of it in `~/.config/crew/crew.json`.
+
+## crew-reap
+
 Coding agents create a git worktree per session and none of them clean up.
-`crew-reap` finds the abandoned ones and removes them without losing work.
+`crew-reap` finds the abandoned ones and removes them without losing work. It
+is useful on its own, whether or not you ever run a fleet.
 
 It works with any agent that uses `git worktree`, because it asks git rather
 than looking in agent-specific directories. Verified against Claude Code
@@ -106,11 +142,25 @@ crash.
 
 ## Requirements
 
-| Needs | Why |
-|---|---|
-| `python3` 3.8+ | Standard library only, nothing to install |
-| `git` 2.17+ | `worktree list --porcelain`, `worktree remove`, `--no-optional-locks` |
-| `lsof` | Tells a busy worktree from an abandoned one |
+| Needs | For | Why |
+|---|---|---|
+| `python3` 3.8+ | both | Standard library only, nothing to install |
+| `git` 2.17+ | both | `worktree list --porcelain`, `worktree remove`, `--no-optional-locks` |
+| `lsof` | `crew-reap` | Tells a busy worktree from an abandoned one |
+| `cmux` 0.64.22+ | `crew` | Tabs, titles, reading a session's screen, agent hooks |
+
+Plus at least one agent, each of which must already be signed in. crew never
+handles credentials; a worker that lands on a login screen fails loudly and is
+never typed at.
+
+| Agent | Verified | Notes |
+|---|---|---|
+| Claude Code | 2.1.228 | Makes its own worktree |
+| Codex | 0.147.0 | Older versions cannot read a config written by the current desktop app |
+| Cursor | 2026.08.11 | Makes its own worktree |
+
+Run `cmux hooks setup` once so cmux can report each session's state. Without it
+`crew status` cannot see anything.
 
 `lsof` is not optional. crew exits with status 2 rather than run without it,
 because a liveness check that silently returns nothing would mark every
