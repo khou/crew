@@ -10,6 +10,7 @@ Dry run unless you pass --apply.
 """
 
 import argparse
+import glob
 import json
 import os
 import shutil
@@ -41,7 +42,16 @@ DEFAULTS = {
     # declaring these per project in <repo>/.crew.json instead, which travels
     # with the project and works for everyone who checks it out.
     "rescue": {},
+    # JSON files where a tool records its sessions. Any object holding both a
+    # working directory and a pid counts as one, whatever the tool. This is
+    # how a paused-but-resumable session keeps its worktree: the process is
+    # gone, so nothing else would notice it. Add your own globs here.
+    "session_registries": ["~/.cmuxterm/*-hook-sessions.json"],
 }
+
+# Keys a tool might use for a session's working directory and process id.
+CWD_KEYS = ("cwd", "workingDirectory", "working_directory", "directory", "path")
+PID_KEYS = ("pid", "processId", "process_id")
 
 # Per-repo config, relative paths, e.g. {"rescue": ["art/generated"]}
 REPO_CONFIG = ".crew.json"
@@ -67,16 +77,28 @@ def human(n):
 
 
 def dir_size(path):
+    """Bytes actually reclaimed by deleting this tree.
+
+    Hard links are counted once, the way du does. Build directories are full
+    of them, and counting each link separately overstates the saving badly.
+    """
     total = 0
+    seen = set()
     for root, dirs, files in os.walk(path, onerror=lambda e: None):
         for f in files:
             fp = os.path.join(root, f)
             try:
                 st = os.lstat(fp)
-                if not os.path.islink(fp):
-                    total += st.st_size
             except OSError:
-                pass
+                continue
+            if os.path.islink(fp):
+                continue
+            if st.st_nlink > 1:
+                key = (st.st_dev, st.st_ino)
+                if key in seen:
+                    continue
+                seen.add(key)
+            total += st.st_size
     return total
 
 
@@ -127,9 +149,7 @@ def rescue_paths(repo, cfg):
 
 
 # --- liveness -------------------------------------------------------------
-# A worktree is only reaped when nothing is using it. Three independent
-# sources, because no single one covers all three agents: Cursor's cmux hook
-# records the wrong cwd, and a crashed agent leaves no record at all.
+# A worktree is only reaped when nothing is using it.
 
 def pid_alive(pid):
     try:
@@ -139,37 +159,43 @@ def pid_alive(pid):
         return False
 
 
-def live_cwds():
-    """Directories currently in use by a live process, from every source."""
+def registry_cwds(patterns):
+    """Working directories claimed by a live session in any tool's registry.
+
+    Walks each JSON file looking for objects that carry both a working
+    directory and a process id, rather than knowing any tool's schema. That
+    keeps it working for tools this was never written against.
+    """
     found = set()
-
-    # 1. Claude's own background/interactive session registry.
-    rc, out = run(["claude", "agents", "--json"], timeout=45)
-    if rc == 0 and out.startswith("["):
-        try:
-            for s in json.loads(out):
-                if s.get("cwd") and pid_alive(s.get("pid")):
-                    found.add(os.path.realpath(s["cwd"]))
-        except ValueError:
-            pass
-
-    # 2. cmux agent hook stores, one per agent.
-    hooks = os.path.join(HOME, ".cmuxterm")
-    if os.path.isdir(hooks):
-        for name in os.listdir(hooks):
-            if not name.endswith("-hook-sessions.json"):
-                continue
+    for pattern in patterns:
+        for path in glob.glob(os.path.expanduser(pattern)):
             try:
-                with open(os.path.join(hooks, name)) as fh:
+                with open(path) as fh:
                     data = json.load(fh)
             except (OSError, ValueError):
                 continue
-            for s in (data.get("sessions") or {}).values():
-                if s.get("cwd") and pid_alive(s.get("pid")):
-                    found.add(os.path.realpath(s["cwd"]))
+            stack = [data]
+            while stack:
+                node = stack.pop()
+                if isinstance(node, dict):
+                    cwd = next((node[k] for k in CWD_KEYS
+                                if isinstance(node.get(k), str)), None)
+                    pid = next((node[k] for k in PID_KEYS if k in node), None)
+                    if cwd and pid is not None and pid_alive(pid):
+                        found.add(os.path.realpath(cwd))
+                    stack.extend(node.values())
+                elif isinstance(node, list):
+                    stack.extend(node)
+    return found
 
-    # 3. Every process's actual working directory. This is the only source
-    #    that catches an agent whose hook lies or was never installed.
+
+def process_cwds():
+    """Every live process's working directory.
+
+    The general case: it needs no cooperation from whatever created the
+    worktree, and catches tools that keep no registry at all.
+    """
+    found = set()
     rc, out = run(["lsof", "-d", "cwd", "-F", "n"], timeout=90)
     if rc in (0, 1) and out:
         for line in out.splitlines():
@@ -463,7 +489,7 @@ def main():
             + CONFIG_PATH)
         return 0
 
-    live = live_cwds()
+    live = process_cwds() | registry_cwds(cfg["session_registries"])
     plans = []
     for repo in repos:
         for wt in list_worktrees(repo):

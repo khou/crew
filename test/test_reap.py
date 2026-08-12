@@ -8,6 +8,7 @@ Python's. Nothing here touches the user's repos.
 Run: python3 test/test_reap.py
 """
 
+import importlib.machinery
 import json
 import os
 import shutil
@@ -17,6 +18,16 @@ import time
 import unittest
 
 REAP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bin", "crew-reap")
+
+
+def reap_module():
+    """Import crew-reap for the few things worth testing as functions."""
+    import importlib.util
+    spec = importlib.util.spec_from_loader(
+        "crew_reap", importlib.machinery.SourceFileLoader("crew_reap", REAP))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def git(repo, *args, check=True):
@@ -199,6 +210,39 @@ class ReapTest(unittest.TestCase):
         self.assertNotIn("idle window", second,
                          "the first scan made the worktree look freshly active")
         self.assertEqual(first.count("remove"), second.count("remove"))
+
+    def test_session_registry_protects_a_worktree_with_no_live_process(self):
+        # A paused-but-resumable session leaves no process, so this is the
+        # only thing standing between it and removal.
+        wt = self.worktree("paused")
+        reg = os.path.join(self.tmp, "sessions.json")
+        with open(reg, "w") as fh:
+            json.dump({"sessions": {"abc": {"cwd": wt, "pid": os.getpid()}}}, fh)
+        self.config({"session_registries": [reg]})
+        out = self.reap("--apply")
+        self.assertTrue(os.path.isdir(wt), "reaped a worktree a live session claims")
+        self.assertIn("in use by a running process", out)
+
+    def test_session_registry_entry_for_a_dead_pid_does_not_protect(self):
+        wt = self.worktree("finished")
+        reg = os.path.join(self.tmp, "sessions.json")
+        with open(reg, "w") as fh:
+            json.dump({"sessions": {"abc": {"cwd": wt, "pid": 999999}}}, fh)
+        self.config({"session_registries": [reg]})
+        self.reap("--apply")
+        self.assertFalse(os.path.exists(wt), "a dead session blocked removal forever")
+
+    def test_hard_links_are_counted_once(self):
+        # Build directories are full of hard links, and one inode is freed
+        # once however many names point at it.
+        d = os.path.join(self.tmp, "links")
+        os.makedirs(d)
+        real = os.path.join(d, "original.bin")
+        with open(real, "w") as fh:
+            fh.write("x" * 400000)
+        for i in range(4):
+            os.link(real, os.path.join(d, f"link{i}.bin"))
+        self.assertEqual(reap_module().dir_size(d), 400000)
 
     def test_second_apply_is_a_no_op(self):
         self.worktree("once")

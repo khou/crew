@@ -21,8 +21,8 @@ Dry run is the default. Nothing is removed until you pass `--apply`.
 ## What it does to each worktree
 
 1. Skips it if anything is using it: a live process with its working directory
-   inside, a live session in Claude's agent registry or a cmux hook store, a
-   git lock naming a live pid, or git metadata touched in the last hour.
+   inside, a live session in a tool's session registry, a git lock naming a
+   live pid, or git metadata touched in the last hour.
 2. Rescues configured gitignored files that the primary checkout does not have.
 3. Commits anything uncommitted to that worktree's branch, so nothing is lost.
 4. Removes the directory. Never with `--force`.
@@ -73,6 +73,26 @@ Everything is optional. `~/.config/crew/reap.json`:
 Without `roots`, crew scans the parent directory of the repo you are in, or
 falls back to the usual places (`~/src`, `~/code`, `~/dev`, `~/projects`,
 `~/repos`, `~/git`, `~/github`, `~/work`).
+
+### Session registries
+
+A live process is usually enough to tell that a worktree is busy. The exception
+is a session that has been paused and can be resumed later: the process is
+gone, so nothing else would notice, and removing the worktree breaks the
+resume.
+
+Tools that support this write a JSON file recording each session. Point crew at
+yours:
+
+```json
+{ "session_registries": ["~/.some-tool/sessions/*.json"] }
+```
+
+crew looks for any object carrying both a working directory (`cwd`,
+`workingDirectory`, `working_directory`, `directory` or `path`) and a process
+id (`pid`, `processId` or `process_id`), so it works with tools it was never
+written against. Entries whose process is gone are ignored, so a stale registry
+never blocks cleanup forever.
 
 ## Running it on a schedule
 
