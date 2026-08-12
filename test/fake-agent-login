@@ -1,0 +1,4 @@
+#!/bin/bash
+# Stands in for an agent whose credentials have expired.
+echo "Press any key to log in..."
+while true; do sleep 5; done

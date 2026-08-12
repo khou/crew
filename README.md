@@ -13,6 +13,7 @@ in any combination.
 crew doctor                            # can every agent actually start
 crew spawn worker "add the retry path" # open a worker tab, wait until ready
 crew status                            # who is working, idle, or stuck
+crew wait                              # block until one needs you
 crew say worker-add-the "also cover timeouts"
 crew reap --apply                      # remove finished worktrees
 ```

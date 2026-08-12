@@ -1,0 +1,7 @@
+#!/bin/bash
+# Stands in for a coding agent: reaches a prompt, then echoes what it is told.
+# Lets the cmux path be tested without spending tokens or hitting the network.
+echo "fake-agent ready · ? for shortcuts"
+while IFS= read -r line; do
+  echo "GOT: $line"
+done

@@ -9,6 +9,7 @@ than an API key.
   crew doctor              check every configured agent can actually start
   crew spawn <role> <task> open a worker tab and wait until it is ready
   crew status              what every worker is doing
+  crew wait                block until a worker goes idle or needs you
   crew say <worker> <text> deliver a message, safely
   crew reap                remove finished worktrees (see crew-reap)
 
@@ -29,6 +30,8 @@ CONFIG_PATH = os.environ.get(
     "CREW_CONFIG", os.path.join(HOME, ".config", "crew", "crew.json"))
 STATE_PATH = os.environ.get(
     "CREW_STATE", os.path.join(HOME, ".local", "state", "crew", "workers.json"))
+# cmux writes one of these per agent. Overridable so tests can supply their own.
+HOOKS_DIR = os.environ.get("CREW_HOOKS_DIR", os.path.join(HOME, ".cmuxterm"))
 
 REQUIRED_BINARIES = ("git", "cmux")
 
@@ -302,7 +305,7 @@ def hook_sessions():
     one status view possible without per-agent code.
     """
     out = {}
-    hooks = os.path.join(HOME, ".cmuxterm")
+    hooks = HOOKS_DIR
     if not os.path.isdir(hooks):
         return out
     for fn in os.listdir(hooks):
@@ -369,7 +372,9 @@ def cmd_spawn(args, cfg):
         die(f"role {args.role} uses unknown agent {role['agent']}")
 
     limit = cfg["max_workers"]
-    live = [w for w in workers().values() if pid_alive(w.get("pid"))]
+    sessions = hook_sessions()
+    live = [w for w in workers().values()
+            if worker_state(w, sessions)[0] not in ("gone",)]
     if limit and len(live) >= limit:
         die(f"{len(live)} workers already running, limit is {limit}. "
             "Raise max_workers or reap one first.", 1)
@@ -549,10 +554,7 @@ def cmd_status(args, cfg):
         return 0
     log(f"{'worker':28} {'role':10} {'agent':8} {'state':10} where")
     for name, w in sorted(all_w.items()):
-        s = sessions.get(w["surface"], {})
-        state = s.get("state", "unknown")
-        if state == "unknown" and not pid_alive(s.get("pid")):
-            state = "gone"
+        state, s = worker_state(w, sessions)
         # The agent may have moved itself into a worktree it created, so
         # trust what it reports over what crew asked for.
         actual = s.get("cwd") or w.get("cwd", "")
@@ -567,6 +569,60 @@ def cmd_status(args, cfg):
         log("")
         log(f"waiting on you: {', '.join(waiting)}")
     return 0
+
+
+def worker_state(w, sessions):
+    """One worker's state, from the terminal rather than from the worker.
+
+    A worker that crashed or wedged cannot report that, so this never asks it.
+    """
+    s = sessions.get(w["surface"], {})
+    if not s:
+        # No session recorded yet. Either it is still starting, or whatever
+        # was there has gone without cmux noticing.
+        age = time.time() - w.get("started", 0)
+        return "starting" if age < 60 else "gone", s
+    if not pid_alive(s.get("pid")):
+        return "gone", s
+    return s.get("state", "unknown"), s
+
+
+def cmd_wait(args, cfg):
+    """Block until a worker needs the director, then say which and why.
+
+    This is what keeps a fleet moving without a background process: the
+    director's loop is spawn, wait, handle, repeat. It returns as soon as
+    anything has changed since the last call, so a worker that finished while
+    the director was busy is reported immediately rather than waited on.
+    """
+    interesting = {"idle", "needsInput", "gone"}
+    deadline = time.time() + args.timeout
+    first = True
+    while True:
+        all_w = workers()
+        if not all_w:
+            log("no workers")
+            return 0
+        sessions = hook_sessions()
+        changed = []
+        for name, w in sorted(all_w.items()):
+            state, _ = worker_state(w, sessions)
+            if state != w.get("seen") and state in interesting:
+                changed.append((name, state, w))
+        if changed:
+            for name, state, w in changed:
+                w["seen"] = state
+                put_worker(name, w)
+                log(f"{name:28} {state:10} {w['role']:10} {w['task'][:44]}")
+            return 0
+        if not first and time.time() >= deadline:
+            log(f"nothing changed in {args.timeout}s")
+            return 0
+        first = False
+        if time.time() >= deadline:
+            log(f"nothing changed in {args.timeout}s")
+            return 0
+        time.sleep(args.poll)
 
 
 def cmd_say(args, cfg):
@@ -584,6 +640,12 @@ def cmd_say(args, cfg):
         cmux("send-key", "--workspace", w["workspace"], "--surface", w["surface"],
              "escape")
         time.sleep(1)
+        # Escape immediately followed by text reads as one escape sequence and
+        # swallows the first character. Clearing the line separates them and
+        # removes anything the interrupted turn left in the composer.
+        cmux("send-key", "--workspace", w["workspace"], "--surface", w["surface"],
+             "ctrl+u")
+        time.sleep(0.3)
     ok, why = deliver(w["workspace"], w["surface"], args.message, spec)
     if not ok:
         die(f"not delivered: {why}", 1)
@@ -613,6 +675,10 @@ def main():
 
     sub.add_parser("status", help="what every worker is doing")
 
+    wt = sub.add_parser("wait", help="block until a worker needs you")
+    wt.add_argument("--timeout", type=int, default=120)
+    wt.add_argument("--poll", type=float, default=2.0)
+
     sy = sub.add_parser("say", help="deliver a message to a worker")
     sy.add_argument("worker")
     sy.add_argument("message")
@@ -632,7 +698,7 @@ def main():
     cfg = config()
     return {
         "doctor": cmd_doctor, "spawn": cmd_spawn, "status": cmd_status,
-        "say": cmd_say, "reap": cmd_reap,
+        "wait": cmd_wait, "say": cmd_say, "reap": cmd_reap,
     }[args.cmd](args, cfg)
 
 

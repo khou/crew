@@ -13,12 +13,16 @@ give each piece to a worker, keep them moving, and clean up after them.
 crew doctor                       # once, at the start of a session
 crew spawn <role> "<task>"        # open a worker and give it work
 crew status                       # who is working, idle, or stuck
+crew wait                         # block until one of them needs you
 crew say <worker> "<message>"     # send a follow-up
 crew reap --apply                 # remove finished worktrees
 ```
 
-Run `crew status` between turns. It is the whole picture: one line per worker
-with its state.
+Your loop is spawn, `crew wait`, handle, repeat. `crew wait` blocks until a
+worker goes idle, needs a human, or dies, then prints which and why. It reports
+each change once, so a worker that finished while you were busy is waiting for
+you at the next call rather than lost. Use `crew status` when you want the whole
+picture instead of just what changed.
 
 | state | meaning | what to do |
 |---|---|---|
