@@ -1,0 +1,526 @@
+#!/usr/bin/env python3
+"""Reclaim disk from finished coding-agent git worktrees, without losing work.
+
+Coding agents (Claude Code, Codex, Cursor) each create a git worktree per
+session and none of them remove it afterwards. This finds those worktrees,
+commits anything uncommitted so nothing is destroyed, and removes the
+directory. The branch always survives.
+
+Dry run unless you pass --apply.
+"""
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+
+HOME = os.path.expanduser("~")
+CONFIG_PATH = os.environ.get(
+    "CREW_REAP_CONFIG", os.path.join(HOME, ".config", "crew", "reap.json"))
+
+# Where projects usually live. Only those that exist are scanned, and only
+# when you do not name a repo or run from inside one.
+COMMON_ROOTS = ["src", "code", "dev", "projects", "repos", "git", "github", "work"]
+
+DEFAULTS = {
+    # Empty means "guess", see resolve_roots().
+    "roots": [],
+    # Skip a worktree whose git metadata changed within this many minutes.
+    "idle_minutes": 60,
+    # Refuse to commit a single file larger than this, or a total larger than
+    # max_total_mb. An immortal branch pins those objects past any future gc.
+    "max_file_mb": 10,
+    "max_total_mb": 50,
+    # Never commit onto these. An agent worktree left sitting on a shared
+    # branch would otherwise have its leftovers committed straight onto it.
+    "protected_branches": ["main", "master", "develop", "trunk", "release"],
+    # Gitignored paths worth keeping, keyed by absolute repo path. Prefer
+    # declaring these per project in <repo>/.crew.json instead, which travels
+    # with the project and works for everyone who checks it out.
+    "rescue": {},
+}
+
+# Per-repo config, relative paths, e.g. {"rescue": ["art/generated"]}
+REPO_CONFIG = ".crew.json"
+
+
+def log(msg=""):
+    print(msg, flush=True)
+
+
+def run(args, cwd=None, check=False, timeout=120):
+    p = subprocess.run(
+        args, cwd=cwd, check=check, timeout=timeout,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    return p.returncode, p.stdout.strip()
+
+
+def human(n):
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return f"{n:.0f}{unit}" if unit == "B" else f"{n:.1f}{unit}"
+        n /= 1024.0
+
+
+def dir_size(path):
+    total = 0
+    for root, dirs, files in os.walk(path, onerror=lambda e: None):
+        for f in files:
+            fp = os.path.join(root, f)
+            try:
+                st = os.lstat(fp)
+                if not os.path.islink(fp):
+                    total += st.st_size
+            except OSError:
+                pass
+    return total
+
+
+def load_config():
+    cfg = dict(DEFAULTS)
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH) as fh:
+                cfg.update(json.load(fh))
+        except (OSError, ValueError) as e:
+            log(f"warning: ignoring unreadable {CONFIG_PATH}: {e}")
+    cfg["roots"] = [os.path.expanduser(r) for r in cfg["roots"]]
+    return cfg
+
+
+def resolve_roots(cfg):
+    """Where to look for repos when none was named."""
+    if cfg["roots"]:
+        return cfg["roots"]
+    rc, out = run(["git", "rev-parse", "--show-toplevel"])
+    if rc == 0 and out:
+        # Run from inside a repo: that repo's neighbours are the obvious scope.
+        return [os.path.dirname(os.path.realpath(out))]
+    return [os.path.join(HOME, d) for d in COMMON_ROOTS
+            if os.path.isdir(os.path.join(HOME, d))]
+
+
+def rescue_paths(repo, cfg):
+    """Gitignored paths worth keeping, from the repo's own config then global.
+
+    Repo-local config is preferred: it travels with the project, so anyone
+    running crew against it gets the same protection without configuring
+    anything.
+    """
+    paths = []
+    try:
+        with open(os.path.join(repo, REPO_CONFIG)) as fh:
+            paths += list(json.load(fh).get("rescue") or [])
+    except (OSError, ValueError):
+        pass
+    paths += list(cfg.get("rescue", {}).get(os.path.realpath(repo)) or [])
+    seen, out = set(), []
+    for p in paths:
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out
+
+
+# --- liveness -------------------------------------------------------------
+# A worktree is only reaped when nothing is using it. Three independent
+# sources, because no single one covers all three agents: Cursor's cmux hook
+# records the wrong cwd, and a crashed agent leaves no record at all.
+
+def pid_alive(pid):
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def live_cwds():
+    """Directories currently in use by a live process, from every source."""
+    found = set()
+
+    # 1. Claude's own background/interactive session registry.
+    rc, out = run(["claude", "agents", "--json"], timeout=45)
+    if rc == 0 and out.startswith("["):
+        try:
+            for s in json.loads(out):
+                if s.get("cwd") and pid_alive(s.get("pid")):
+                    found.add(os.path.realpath(s["cwd"]))
+        except ValueError:
+            pass
+
+    # 2. cmux agent hook stores, one per agent.
+    hooks = os.path.join(HOME, ".cmuxterm")
+    if os.path.isdir(hooks):
+        for name in os.listdir(hooks):
+            if not name.endswith("-hook-sessions.json"):
+                continue
+            try:
+                with open(os.path.join(hooks, name)) as fh:
+                    data = json.load(fh)
+            except (OSError, ValueError):
+                continue
+            for s in (data.get("sessions") or {}).values():
+                if s.get("cwd") and pid_alive(s.get("pid")):
+                    found.add(os.path.realpath(s["cwd"]))
+
+    # 3. Every process's actual working directory. This is the only source
+    #    that catches an agent whose hook lies or was never installed.
+    rc, out = run(["lsof", "-d", "cwd", "-F", "n"], timeout=90)
+    if rc in (0, 1) and out:
+        for line in out.splitlines():
+            if line.startswith("n/"):
+                found.add(os.path.realpath(line[1:]))
+    return found
+
+
+def is_under(path, parent):
+    path, parent = os.path.realpath(path), os.path.realpath(parent)
+    return path == parent or path.startswith(parent + os.sep)
+
+
+# --- discovery ------------------------------------------------------------
+
+def find_repos(roots):
+    repos = []
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        for name in sorted(os.listdir(root)):
+            path = os.path.join(root, name)
+            if os.path.isdir(os.path.join(path, ".git")):
+                repos.append(path)
+    return repos
+
+
+def list_worktrees(repo):
+    """Every worktree git knows about, wherever it lives on disk.
+
+    Agents scatter these across .claude/worktrees, .git/codex-worktrees,
+    ~/.cursor/worktrees and ~/.codex/worktrees, but git records all of them,
+    so one command finds the lot.
+    """
+    rc, out = run(["git", "worktree", "list", "--porcelain"], cwd=repo)
+    if rc != 0:
+        return []
+    trees, cur = [], {}
+    for line in out.splitlines():
+        if not line.strip():
+            if cur:
+                trees.append(cur)
+            cur = {}
+            continue
+        key, _, val = line.partition(" ")
+        if key == "worktree":
+            cur = {"path": val, "locked": False, "lock_reason": "",
+                   "detached": False, "branch": None, "prunable": False}
+        elif key == "HEAD":
+            cur["head"] = val
+        elif key == "branch":
+            cur["branch"] = val.replace("refs/heads/", "")
+        elif key == "detached":
+            cur["detached"] = True
+        elif key == "locked":
+            cur["locked"] = True
+            cur["lock_reason"] = val
+        elif key == "prunable":
+            cur["prunable"] = True
+    if cur:
+        trees.append(cur)
+    return trees
+
+
+def gitdir_mtime(repo, wt_path):
+    """Newest mtime of the worktree's git metadata.
+
+    A cheap proxy for recent activity. Walking a 6GB tree is not.
+    """
+    rc, out = run(["git", "rev-parse", "--git-dir"], cwd=wt_path)
+    if rc != 0:
+        return 0
+    gd = out if os.path.isabs(out) else os.path.join(wt_path, out)
+    newest = 0
+    for f in ("index", "HEAD", "ORIG_HEAD"):
+        fp = os.path.join(gd, f)
+        try:
+            newest = max(newest, os.stat(fp).st_mtime)
+        except OSError:
+            pass
+    return newest
+
+
+# --- reaping --------------------------------------------------------------
+
+def dirty_files(wt):
+    """Paths git would stage: modified and untracked, never ignored."""
+    # --no-optional-locks keeps git from rewriting the index just to look at
+    # it. Without it, scanning makes every worktree appear freshly active and
+    # the next run skips them all.
+    rc, out = run(["git", "--no-optional-locks", "status", "--porcelain",
+                   "--untracked-files=all"], cwd=wt)
+    if rc != 0:
+        return None
+    paths = []
+    for line in out.splitlines():
+        p = line[3:].strip()
+        if " -> " in p:
+            p = p.split(" -> ", 1)[1]
+        paths.append(p.strip('"'))
+    return paths
+
+
+def rescue_missing(wt_path, repo, rel):
+    """Files under `rel` that exist in the worktree but not the primary.
+
+    Compared file by file, not directory by directory. The primary usually
+    has a copy of these paths already, and the handful of files the worktree
+    added are exactly the ones worth keeping.
+    """
+    src_root = os.path.join(wt_path, rel)
+    dst_root = os.path.join(repo, rel)
+    if not os.path.exists(src_root):
+        return [], 0
+    if os.path.isfile(src_root):
+        if os.path.exists(dst_root):
+            return [], 0
+        return [""], os.path.getsize(src_root)
+
+    missing, nbytes = [], 0
+    for root, dirs, files in os.walk(src_root, onerror=lambda e: None):
+        for f in files:
+            sp = os.path.join(root, f)
+            if os.path.islink(sp):
+                continue
+            sub = os.path.relpath(sp, src_root)
+            if not os.path.exists(os.path.join(dst_root, sub)):
+                try:
+                    nbytes += os.path.getsize(sp)
+                except OSError:
+                    continue
+                missing.append(sub)
+    return missing, nbytes
+
+
+def plan_worktree(repo, wt, cfg, live):
+    """Decide what to do with one worktree. No side effects."""
+    path = wt["path"]
+    d = {"repo": repo, "path": path, "branch": wt.get("branch"),
+         "detached": wt.get("detached"), "locked": wt.get("locked"),
+         "action": None, "reason": "", "size": 0, "dirty": [], "rescue": []}
+
+    if not os.path.isdir(path):
+        d["action"] = "prune"
+        d["reason"] = "directory is gone, git record is stale"
+        return d
+
+    if os.path.realpath(path) == os.path.realpath(repo):
+        d["action"] = "skip"
+        d["reason"] = "primary checkout"
+        return d
+
+    for cwd in live:
+        if is_under(cwd, path):
+            d["action"] = "skip"
+            d["reason"] = "in use by a running process"
+            return d
+
+    if wt["locked"] and "pid " in wt["lock_reason"]:
+        try:
+            pid = wt["lock_reason"].split("pid ", 1)[1].split()[0]
+            if pid_alive(pid):
+                d["action"] = "skip"
+                d["reason"] = f"locked by live pid {pid}"
+                return d
+        except IndexError:
+            pass
+
+    age_min = (time.time() - gitdir_mtime(repo, path)) / 60.0
+    if age_min < cfg["idle_minutes"]:
+        d["action"] = "skip"
+        d["reason"] = f"active {age_min:.0f}m ago, under the {cfg['idle_minutes']}m idle window"
+        return d
+
+    d["size"] = dir_size(path)
+
+    for rel in rescue_paths(repo, cfg):
+        missing, nbytes = rescue_missing(path, repo, rel)
+        if missing:
+            d["rescue"].append((rel, len(missing), nbytes))
+
+    files = dirty_files(path)
+    if files is None:
+        d["action"] = "skip"
+        d["reason"] = "git status failed"
+        return d
+    d["dirty"] = files
+
+    d["protected"] = wt.get("branch") in cfg["protected_branches"]
+
+    if files:
+        total = 0
+        for rel in files:
+            try:
+                sz = os.path.getsize(os.path.join(path, rel))
+            except OSError:
+                continue
+            if sz > cfg["max_file_mb"] * 1024 * 1024:
+                d["action"] = "skip"
+                d["reason"] = f"{rel} is {human(sz)}, over the {cfg['max_file_mb']}MB per-file limit"
+                return d
+            total += sz
+        if total > cfg["max_total_mb"] * 1024 * 1024:
+            d["action"] = "skip"
+            d["reason"] = f"{human(total)} uncommitted, over the {cfg['max_total_mb']}MB limit"
+            return d
+        d["action"] = "commit+remove"
+    else:
+        d["action"] = "remove"
+    return d
+
+
+def apply_plan(d):
+    """Execute one plan. Every step is safe to re-run after a crash."""
+    path, repo = d["path"], d["repo"]
+
+    if d["action"] == "prune":
+        run(["git", "worktree", "prune"], cwd=repo)
+        return True, "pruned stale record"
+
+    for rel, _, _ in d["rescue"]:
+        missing, _ = rescue_missing(path, repo, rel)
+        for sub in missing:
+            src = os.path.join(path, rel, sub) if sub else os.path.join(path, rel)
+            dst = os.path.join(repo, rel, sub) if sub else os.path.join(repo, rel)
+            try:
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
+            except (OSError, shutil.Error) as e:
+                return False, f"rescue of {rel}/{sub} failed, nothing removed: {e}"
+
+    if d["action"] == "commit+remove":
+        # Leftovers never land on a shared branch. Move to a rescue branch
+        # first, so main stays exactly where it was.
+        if d.get("protected"):
+            name = "crew-rescued/" + os.path.basename(path)
+            rc, out = run(["git", "switch", "-c", name], cwd=path)
+            if rc != 0:
+                return False, f"could not move off {d['branch']}: {out}"
+            d["branch"] = name
+        rc, out = run(["git", "add", "-A"], cwd=path)
+        if rc != 0:
+            return False, f"git add failed: {out}"
+        msg = f"crew reap: {len(d['dirty'])} uncommitted file(s) from an abandoned agent worktree"
+        rc, out = run([
+            "git", "-c", "user.name=crew", "-c", "user.email=crew@local",
+            "commit", "--no-verify", "-m", msg,
+        ], cwd=path)
+        if rc != 0:
+            return False, f"commit failed: {out}"
+        # A detached HEAD commit is unreachable the moment the worktree goes.
+        if d["detached"]:
+            rc, sha = run(["git", "rev-parse", "HEAD"], cwd=path)
+            name = "crew-rescued/" + os.path.basename(path)
+            rc2, out2 = run(["git", "branch", name, sha], cwd=repo)
+            if rc2 != 0:
+                return False, f"could not save detached commit to a branch: {out2}"
+
+    if d["locked"]:
+        run(["git", "worktree", "unlock", path], cwd=repo)
+
+    rc, out = run(["git", "worktree", "remove", path], cwd=repo)
+    if rc != 0:
+        return False, f"remove refused, worktree left in place: {out}"
+
+    run(["git", "worktree", "prune"], cwd=repo)
+    return True, "removed"
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--apply", action="store_true",
+                    help="actually do it (default is a dry run)")
+    ap.add_argument("--repo", action="append",
+                    help="limit to this repo, repeatable")
+    ap.add_argument("--idle-minutes", type=int,
+                    help="override the idle window")
+    ap.add_argument("--quiet", action="store_true",
+                    help="only print worktrees that will be acted on")
+    args = ap.parse_args()
+
+    cfg = load_config()
+    if args.idle_minutes is not None:
+        cfg["idle_minutes"] = args.idle_minutes
+
+    repos = [os.path.realpath(os.path.expanduser(r)) for r in args.repo] if args.repo \
+        else find_repos(resolve_roots(cfg))
+    if not repos:
+        log("no git repos found. Pass --repo <path>, or set roots in "
+            + CONFIG_PATH)
+        return 0
+
+    live = live_cwds()
+    plans = []
+    for repo in repos:
+        for wt in list_worktrees(repo):
+            d = plan_worktree(repo, wt, cfg, live)
+            if d["action"] != "skip" or not args.quiet:
+                plans.append(d)
+
+    actionable = [d for d in plans if d["action"] not in ("skip", None)]
+    if not actionable:
+        log("nothing to reap")
+        if not args.quiet:
+            for d in plans:
+                log(f"  skip  {d['path']}\n        {d['reason']}")
+        return 0
+
+    log("dry run, nothing has changed. Pass --apply to execute.\n" if not args.apply else "")
+    reclaimable = 0
+    for d in actionable:
+        reclaimable += d["size"]
+        log(f"{d['action']:14} {d['path']}")
+        log(f"{'':14} {human(d['size'])}, branch {d['branch'] or '(detached)'}"
+            + (f", {len(d['dirty'])} uncommitted file(s)" if d["dirty"] else ""))
+        if d.get("protected"):
+            log(f"{'':14} {d['branch']} is protected, leftovers go to "
+                f"crew-rescued/{os.path.basename(d['path'])} instead")
+        for rel, count, sz in d["rescue"]:
+            log(f"{'':14} rescue {count} file(s) ({human(sz)}) under {rel}, "
+                f"absent from the primary checkout")
+
+    skipped = [d for d in plans if d["action"] == "skip"]
+    if skipped and not args.quiet:
+        log("")
+        for d in skipped:
+            log(f"{'skip':14} {d['path']}\n{'':14} {d['reason']}")
+
+    log(f"\n{len(actionable)} worktree(s), {human(reclaimable)} reclaimable")
+
+    if not args.apply:
+        return 0
+
+    log("")
+    failures = 0
+    freed = 0
+    for d in actionable:
+        ok, msg = apply_plan(d)
+        if ok:
+            freed += d["size"]
+            log(f"ok      {d['path']}: {msg}")
+        else:
+            failures += 1
+            log(f"FAILED  {d['path']}: {msg}")
+    log(f"\nfreed {human(freed)}, {failures} failure(s)")
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
