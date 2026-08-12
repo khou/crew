@@ -53,6 +53,10 @@ DEFAULTS = {
 CWD_KEYS = ("cwd", "workingDirectory", "working_directory", "directory", "path")
 PID_KEYS = ("pid", "processId", "process_id")
 
+# git finds the worktrees; lsof tells us which are still in use. Neither is
+# optional: without lsof every worktree looks idle.
+REQUIRED_BINARIES = ("git", "lsof")
+
 # Per-repo config, relative paths, e.g. {"rescue": ["art/generated"]}
 REPO_CONFIG = ".crew.json"
 
@@ -190,18 +194,24 @@ def registry_cwds(patterns):
 
 
 def process_cwds():
-    """Every live process's working directory.
+    """Every live process's working directory, or None if that cannot be read.
 
     The general case: it needs no cooperation from whatever created the
-    worktree, and catches tools that keep no registry at all.
+    worktree, and catches tools that keep no registry at all. None means the
+    check failed, which must stop the run. Returning an empty set would make
+    every worktree look idle and reap live work.
     """
     found = set()
-    rc, out = run(["lsof", "-d", "cwd", "-F", "n"], timeout=90)
-    if rc in (0, 1) and out:
-        for line in out.splitlines():
-            if line.startswith("n/"):
-                found.add(os.path.realpath(line[1:]))
-    return found
+    try:
+        rc, out = run(["lsof", "-d", "cwd", "-F", "n"], timeout=90)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in out.splitlines():
+        if line.startswith("n/"):
+            found.add(os.path.realpath(line[1:]))
+    # This process is running from somewhere, so an empty result means lsof
+    # did not do its job rather than that nothing is running.
+    return found or None
 
 
 def is_under(path, parent):
@@ -478,6 +488,13 @@ def main():
                     help="only print worktrees that will be acted on")
     args = ap.parse_args()
 
+    missing = [b for b in REQUIRED_BINARIES if shutil.which(b) is None]
+    if missing:
+        log(f"crew-reap needs {' and '.join(missing)} on PATH. "
+            "Refusing to run: without them it cannot tell a busy worktree "
+            "from an abandoned one.")
+        return 2
+
     cfg = load_config()
     if args.idle_minutes is not None:
         cfg["idle_minutes"] = args.idle_minutes
@@ -489,7 +506,12 @@ def main():
             + CONFIG_PATH)
         return 0
 
-    live = process_cwds() | registry_cwds(cfg["session_registries"])
+    running = process_cwds()
+    if running is None:
+        log("could not read running processes from lsof. Refusing to run: "
+            "every worktree would look idle and live work could be removed.")
+        return 2
+    live = running | registry_cwds(cfg["session_registries"])
     plans = []
     for repo in repos:
         for wt in list_worktrees(repo):

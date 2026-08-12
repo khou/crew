@@ -106,4 +106,15 @@ crash.
 
 ## Requirements
 
-Python 3 and git. No packages to install.
+| Needs | Why |
+|---|---|
+| `python3` 3.8+ | Standard library only, nothing to install |
+| `git` 2.17+ | `worktree list --porcelain`, `worktree remove`, `--no-optional-locks` |
+| `lsof` | Tells a busy worktree from an abandoned one |
+
+`lsof` is not optional. crew exits with status 2 rather than run without it,
+because a liveness check that silently returns nothing would mark every
+worktree idle and remove work that is still in progress. The same applies if
+`lsof` is present but fails.
+
+macOS ships all three. On Debian or Ubuntu, `apt install lsof`.

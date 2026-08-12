@@ -211,6 +211,38 @@ class ReapTest(unittest.TestCase):
                          "the first scan made the worktree look freshly active")
         self.assertEqual(first.count("remove"), second.count("remove"))
 
+    def _run_with_fake_path(self, *extra, lsof_body=None):
+        """Run with a PATH where lsof is missing, or replaced by lsof_body."""
+        fake = os.path.join(self.tmp, "fakebin")
+        os.makedirs(fake, exist_ok=True)
+        for real in ("git", "python3"):
+            found = shutil.which(real)
+            if found and not os.path.exists(os.path.join(fake, real)):
+                os.symlink(found, os.path.join(fake, real))
+        if lsof_body is not None:
+            p = os.path.join(fake, "lsof")
+            with open(p, "w") as fh:
+                fh.write(lsof_body)
+            os.chmod(p, 0o755)
+        env = dict(os.environ, CREW_REAP_CONFIG=self.cfg_path, PATH=fake)
+        return subprocess.run([REAP, "--repo", self.repo, *extra],
+                              capture_output=True, text=True, env=env, cwd=self.tmp)
+
+    def test_refuses_to_run_without_lsof(self):
+        wt = self.worktree("safe")
+        p = self._run_with_fake_path("--apply")
+        self.assertEqual(p.returncode, 2)
+        self.assertIn("lsof", p.stdout + p.stderr)
+        self.assertTrue(os.path.isdir(wt), "reaped without being able to check liveness")
+
+    def test_refuses_to_run_when_lsof_returns_nothing(self):
+        # A silent lsof failure is the dangerous case: an empty result would
+        # otherwise read as "no process is using anything".
+        wt = self.worktree("safe2")
+        p = self._run_with_fake_path("--apply", lsof_body="#!/bin/sh\nexit 1\n")
+        self.assertEqual(p.returncode, 2)
+        self.assertTrue(os.path.isdir(wt), "an empty liveness result was treated as idle")
+
     def test_session_registry_protects_a_worktree_with_no_live_process(self):
         # A paused-but-resumable session leaves no process, so this is the
         # only thing standing between it and removal.
