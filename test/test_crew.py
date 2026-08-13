@@ -191,6 +191,33 @@ class StaleNeedsInputTest(unittest.TestCase):
         self.assertEqual(self.state("Press any key to log in"), "needsInput")
 
 
+class DeliverTest(unittest.TestCase):
+    """A blocked screen must never be typed at, not even a probe."""
+
+    def setUp(self):
+        self.crew = crew_module()
+        self.crew.exited = lambda surface: None
+
+    def test_a_blocked_screen_receives_no_keystrokes(self):
+        calls = []
+
+        def fake_cmux(*args, timeout=60):
+            calls.append(args)
+            if args[0] == "read-screen":
+                return 0, "hello there\nPress any key to log in"
+            return 0, ""
+
+        self.crew.cmux = fake_cmux
+        spec = {"blocked": [r"Press any key to log in"]}
+
+        ok, why = self.crew.deliver("ws", "s", "hello there", spec)
+
+        self.assertFalse(ok)
+        self.assertIn("only you can answer", why)
+        sent = [c for c in calls if c[0] in ("send", "send-key")]
+        self.assertEqual(sent, [], f"blocked screen was typed at: {sent}")
+
+
 class QuotaOnlyInTheTailTest(unittest.TestCase):
     """A worker writing about limits is not a worker that has hit one."""
 
