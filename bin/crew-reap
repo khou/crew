@@ -124,8 +124,17 @@ def resolve_roots(cfg):
         return cfg["roots"]
     rc, out = run(["git", "rev-parse", "--show-toplevel"])
     if rc == 0 and out:
-        # Run from inside a repo: that repo's neighbours are the obvious scope.
-        return [os.path.dirname(os.path.realpath(out))]
+        # Run from inside a repo: that repo's neighbours are the obvious
+        # scope. From a linked worktree, --show-toplevel points at the
+        # worktree itself, not the primary checkout, so find the primary
+        # via the git dir shared by every worktree instead.
+        rc2, common = run(["git", "rev-parse", "--git-common-dir"])
+        primary = os.path.realpath(out)
+        if rc2 == 0 and common:
+            common = os.path.realpath(common)
+            if os.path.basename(common) == ".git":
+                primary = os.path.dirname(common)
+        return [os.path.dirname(primary)]
     return [os.path.join(HOME, d) for d in COMMON_ROOTS
             if os.path.isdir(os.path.join(HOME, d))]
 
