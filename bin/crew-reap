@@ -118,6 +118,25 @@ def load_config():
     return cfg
 
 
+def primary_checkout(path):
+    """The primary checkout for a repo path, which may itself be a linked
+    worktree.
+
+    A linked worktree's own .crew.json and rescue destination must resolve
+    to the primary checkout, the same one config keys the rescue list by,
+    or a rescue configured for the primary is missed and any file it does
+    rescue lands in the wrong place.
+    """
+    rc, common = run(["git", "rev-parse", "--git-common-dir"], cwd=path)
+    primary = os.path.realpath(path)
+    if rc == 0 and common:
+        common = os.path.realpath(common if os.path.isabs(common)
+                                   else os.path.join(path, common))
+        if os.path.basename(common) == ".git":
+            primary = os.path.dirname(common)
+    return primary
+
+
 def resolve_roots(cfg):
     """Where to look for repos when none was named."""
     if cfg["roots"]:
@@ -125,16 +144,8 @@ def resolve_roots(cfg):
     rc, out = run(["git", "rev-parse", "--show-toplevel"])
     if rc == 0 and out:
         # Run from inside a repo: that repo's neighbours are the obvious
-        # scope. From a linked worktree, --show-toplevel points at the
-        # worktree itself, not the primary checkout, so find the primary
-        # via the git dir shared by every worktree instead.
-        rc2, common = run(["git", "rev-parse", "--git-common-dir"])
-        primary = os.path.realpath(out)
-        if rc2 == 0 and common:
-            common = os.path.realpath(common)
-            if os.path.basename(common) == ".git":
-                primary = os.path.dirname(common)
-        return [os.path.dirname(primary)]
+        # scope.
+        return [os.path.dirname(primary_checkout(out))]
     return [os.path.join(HOME, d) for d in COMMON_ROOTS
             if os.path.isdir(os.path.join(HOME, d))]
 
@@ -550,7 +561,7 @@ def main():
     if args.idle_minutes is not None:
         cfg["idle_minutes"] = args.idle_minutes
 
-    repos = [os.path.realpath(os.path.expanduser(r)) for r in args.repo] if args.repo \
+    repos = [primary_checkout(os.path.expanduser(r)) for r in args.repo] if args.repo \
         else find_repos(resolve_roots(cfg))
     if not repos:
         log("no git repos found. Pass --repo <path>, or set roots in "
