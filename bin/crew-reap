@@ -248,9 +248,16 @@ def process_cwds():
     for line in out.splitlines():
         if line.startswith("n/"):
             found.add(os.path.realpath(line[1:]))
-    # This process is running from somewhere, so an empty result means lsof
-    # did not do its job rather than that nothing is running.
-    return found or None
+    # A truncated listing is the dangerous one: it looks like a complete
+    # answer, and every worktree missing from it reads as idle. rc cannot spot
+    # it, measured: lsof exits 0 with a complete listing, and 1 with a
+    # complete listing too. What it always does is report this very process's
+    # own working directory, so a listing without that was cut short.
+    try:
+        mine = os.path.realpath(os.getcwd())
+    except OSError:
+        return None
+    return found if mine in found else None
 
 
 def is_under(path, parent):

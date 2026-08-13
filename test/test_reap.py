@@ -438,6 +438,19 @@ class ReapTest(unittest.TestCase):
         self.assertEqual(p.returncode, 2)
         self.assertTrue(os.path.isdir(wt), "an empty liveness result was treated as idle")
 
+    def test_refuses_a_listing_that_does_not_include_its_own_process(self):
+        # A truncated listing is the dangerous one: it looks like a complete
+        # answer and every worktree it omits reads as idle. The exit code
+        # cannot spot it, measured: lsof returns 0 with a complete listing and
+        # 1 with a complete listing alike. It does always report the calling
+        # process's own working directory, so a listing lacking that was cut
+        # short. This fake returns one plausible entry and exits 0.
+        wt = self.worktree("safe3")
+        p = self._run_with_fake_path("--apply", lsof_body="#!/bin/sh\necho n/usr\n")
+        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+        self.assertTrue(os.path.isdir(wt),
+                        "a truncated liveness listing was treated as complete")
+
     def test_session_registry_protects_a_worktree_with_no_live_process(self):
         # A paused-but-resumable session leaves no process, so this is the
         # only thing standing between it and removal.
