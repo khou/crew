@@ -246,6 +246,26 @@ class LiveTest(unittest.TestCase):
         subprocess.run(["git", "-C", self.repo, "merge", "--abort"],
                        capture_output=True)
 
+    def test_merge_failure_before_merge_head_does_not_claim_one_is_in_progress(self):
+        # An untracked file that would be overwritten makes git refuse before
+        # MERGE_HEAD exists. There is no merge to resolve or abort, so the
+        # advice from test_merge_names_an_unfinished_merge_rather_than_blaming_you
+        # (an in-progress merge) does not apply here.
+        self.crew("spawn", "f", "a task", "--name", "m7", "--no-task")
+        wt = self.workers()["m7"]["cwd"]
+        self.commit_in(wt, "collide.txt", "worker's version")
+        with open(os.path.join(self.repo, "collide.txt"), "w") as fh:
+            fh.write("untracked, in the way")
+
+        p = self.crew("merge", "m7")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertNotIn("left in progress", p.stdout)
+        self.assertNotIn("merge --abort", p.stdout)
+        rc = subprocess.run(["git", "-C", self.repo, "rev-parse", "-q",
+                             "--verify", "MERGE_HEAD"],
+                            capture_output=True).returncode
+        self.assertNotEqual(rc, 0, "MERGE_HEAD should not exist")
+
     def test_merge_rejects_a_name_that_is_neither_worker_nor_branch(self):
         p = self.crew("merge", "not-a-thing")
         self.assertNotEqual(p.returncode, 0)

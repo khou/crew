@@ -1150,8 +1150,14 @@ def cmd_merge(args, cfg):
         log(f"merge of {branch} into {into} did not complete:")
         log(out)
         log("")
-        log("The merge is left in progress. Resolve it, or run "
-            f"git -C {repo} merge --abort")
+        merge_rc, _ = run(["git", "-C", repo, "rev-parse", "-q", "--verify",
+                           "MERGE_HEAD"])
+        if merge_rc == 0:
+            log("The merge is left in progress. Resolve it, or run "
+                f"git -C {repo} merge --abort")
+        else:
+            log("The merge never started. Resolve the issue above and "
+                "re-run crew merge.")
         return 1
     log(f"merged {branch} into {into}")
     log(f"  {out.splitlines()[-1] if out else ''}")
