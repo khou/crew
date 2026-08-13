@@ -242,7 +242,12 @@ def save_json(path, data):
 
 def config():
     cfg = dict(DEFAULTS)
-    cfg.update(load_json(CONFIG_PATH, {}))
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH) as fh:
+                cfg.update(json.load(fh))
+        except (OSError, ValueError) as e:
+            log(f"warning: ignoring unreadable {CONFIG_PATH}: {e}")
     agents = {k: dict(v) for k, v in AGENTS.items()}
     for name, override in (cfg.get("agents") or {}).items():
         agents.setdefault(name, {}).update(override)
@@ -826,10 +831,10 @@ def worker_state(w, sessions):
         return "gone", sessions.get(w["surface"], {})
     s = sessions.get(w["surface"], {})
     if not s:
-        # No session recorded yet. Either it is still starting, or whatever
-        # was there has gone without cmux noticing.
-        age = time.time() - w.get("started", 0)
-        return "starting" if age < 60 else "gone", s
+        # No session recorded. Most agents register one at launch, but some
+        # only register lazily on their first hook fire, so absence alone is
+        # never proof of death -- only a recorded exit (checked above) is.
+        return "starting", s
     if not pid_alive(s.get("pid")):
         return "gone", s
     return s.get("state", "unknown"), s
@@ -853,11 +858,14 @@ def refresh(all_w, sessions, cfg):
         if state not in ("gone",):
             screen = read_screen(w["workspace"], w["surface"], 40)
 
-        # Only the tail. A worker whose work is about rate limits will write
-        # the words "rate limit" and "quota" into its output, and a review of
-        # this very file did exactly that and was reported as exhausted. An
-        # agent that has actually run out says so last, where it stopped.
+        # Only the true end of the screen. A worker whose work is about rate
+        # limits will write the words "rate limit" and "quota" into its
+        # output, and a review of this very file did exactly that and was
+        # reported as exhausted. An agent that has actually run out says so
+        # last, where it stopped; if output keeps coming after the mention,
+        # it is still running.
         tail = "\n".join(screen.splitlines()[-8:]) if screen else ""
+        last_lines = [l for l in screen.splitlines() if l.strip()][-2:]
         asking = list((spec.get("approval") or {}).get("prompt") or [])
         showing_prompt = tail and any(re.search(p, tail) for p in asking)
         # An agent showing a permission prompt is alive and asking, whatever
@@ -865,8 +873,8 @@ def refresh(all_w, sessions, cfg):
         # them on screen, and being called exhausted also stops it being
         # approved, so it wedges. Reproduced: a fixer working on quota
         # detection asked to run a test named QuotaOnlyInTheTailTest.
-        if tail and not showing_prompt and any(
-                re.search(p, tail, re.I) for p in patterns):
+        if (last_lines and not showing_prompt and any(
+                re.search(p, "\n".join(last_lines), re.I) for p in patterns)):
             state = "quota"
 
         # A session can report needsInput and then finish the turn without
@@ -1140,6 +1148,11 @@ def cmd_merge(args, cfg):
         # worktree has already been reaped is still perfectly mergeable, and
         # reaping is exactly what the advice below tells you to do.
         where = worker_dir(args.worker, w, sessions)
+        if where and os.path.isdir(where) and \
+                os.path.realpath(where) == os.path.realpath(repo):
+            die(f"{args.worker}'s worktree resolved to {repo}, the same "
+                "checkout you are merging into. There is no separate branch "
+                "to merge.", 1)
         branch = w.get("branch")
         if where and os.path.isdir(where):
             branch = worker_branch(where) or branch
@@ -1179,6 +1192,9 @@ def cmd_merge(args, cfg):
             "with the worker's. Commit or stash first.", 1)
 
     into = worker_branch(repo) or "HEAD"
+    if branch == into:
+        die(f"{branch} is already the branch checked out in {repo}. There is "
+            "nothing to merge into itself.", 1)
     rc, out = run(["git", "-C", repo, "merge", "--no-ff", branch, "-m",
                    f"Merge {branch}: {(w or {}).get('task', '')[:60]}"])
     if rc != 0:
