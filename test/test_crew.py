@@ -23,6 +23,7 @@ import time
 import tempfile
 import types
 import unittest
+import unittest.mock as mock
 
 CREW = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bin", "crew")
 
@@ -100,6 +101,21 @@ class DeathTest(unittest.TestCase):
         self.crew.cmux = lambda *a, **k: (captured.update(cmd=a), (0, ""))[1]
         self.crew.launch("ws", surface, "/tmp", ["/bin/true"], {})
         return " ".join(captured["cmd"])
+
+
+class PidAliveTest(unittest.TestCase):
+    """A pid we cannot signal is not the same as a pid that is gone."""
+
+    def setUp(self):
+        self.crew = crew_module()
+
+    def test_permission_denied_is_alive_but_no_such_process_is_dead(self):
+        # os.kill(pid, 0) raises PermissionError for a live pid owned by
+        # another user, not for a dead one.
+        with mock.patch.object(os, "kill", side_effect=PermissionError):
+            self.assertTrue(self.crew.pid_alive(123))
+        with mock.patch.object(os, "kill", side_effect=ProcessLookupError):
+            self.assertFalse(self.crew.pid_alive(123))
 
 
 class DeliverRobustnessTest(unittest.TestCase):
