@@ -119,6 +119,11 @@ holds uncommitted work that is not on the branch.
 it seen, so stopping it mid-wait can at worst repeat something, never lose it.
 Run it again and it picks up anything that happened meanwhile.
 
+**Reap only what you are working on.** `crew reap` is scoped to the repo you
+are in. Never widen it. Running the bare `crew-reap` sweeps every project on
+the machine, which is a thing a person may choose to do and a director must
+not: one did, and removed eighteen worktrees across four unrelated projects.
+
 **Reap when a piece is done.** Every worker leaves a worktree behind. `crew
 reap` commits anything uncommitted to its branch first, so reaping never
 destroys work, but it will not touch a worktree that is still in use.

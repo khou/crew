@@ -334,6 +334,29 @@ class LiveTest(unittest.TestCase):
         self.assertNotIn("APPROVED", self.screen("ap2"),
                          "a blocked screen was answered automatically")
 
+    def test_reap_is_scoped_to_the_repo_you_are_in(self):
+        # A director following the loop ran `crew reap --apply` and reaped 18
+        # worktrees across four unrelated projects. Their work survived on
+        # branches, but nobody asked for it. crew-reap on its own still sweeps
+        # everywhere, which is right when a person runs it deliberately.
+        other = os.path.join(self.tmp, "other")
+        os.makedirs(other)
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=other,
+                       capture_output=True)
+        with open(os.path.join(other, "f.txt"), "w") as fh:
+            fh.write("x")
+        subprocess.run(["git", "add", "-A"], cwd=other, capture_output=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "-qm", "i"], cwd=other, capture_output=True)
+        theirs = os.path.join(self.tmp, "their-worktree")
+        subprocess.run(["git", "worktree", "add", "-q", theirs, "-b", "theirs"],
+                       cwd=other, capture_output=True)
+
+        p = self.crew("reap", "--idle-minutes", "0", "--apply")
+        self.assertTrue(os.path.isdir(theirs),
+                        "reap reached into a repo the director was not working in")
+        self.assertNotIn(theirs, p.stdout)
+
     def test_show_prints_what_a_worker_is_asking(self):
         # status says a worker is waiting. This is how the director finds out
         # what it is waiting for, which is the whole of "surface it to the

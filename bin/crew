@@ -1329,7 +1329,17 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] == "reap":
         reaper = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                               "crew-reap")
-        os.execv(reaper, [reaper, *sys.argv[2:]])
+        rest = sys.argv[2:]
+        # Scoped to the repo you are in unless you say otherwise. crew-reap on
+        # its own sweeps everywhere by design, which is right for a person
+        # running it deliberately and very wrong for a director following the
+        # loop: one did exactly this and reaped 18 worktrees across four other
+        # projects. Their work survived on branches, but nobody asked for it.
+        if not any(a == "--repo" or a.startswith("--repo=") for a in rest):
+            rc, top = run(["git", "rev-parse", "--show-toplevel"])
+            if rc == 0 and top:
+                rest = ["--repo", top] + rest
+        os.execv(reaper, [reaper, *rest])
 
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
