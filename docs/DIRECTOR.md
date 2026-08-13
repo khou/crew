@@ -74,12 +74,21 @@ may be halfway through an edit.
 context. If something one worker learns changes what another should do, that is
 your job to pass along. Nothing else will.
 
-**Finishing a piece is three steps, in order.** `crew merge <worker>` brings
-its branch into the repo you are in. `crew stop <worker>` closes its tab.
-`crew reap --apply` removes the worktree. Each refuses rather than guesses:
-merge will not run while the worker is working, into a dirty checkout, or with
-uncommitted work in the worktree, and it tells you which. Reap takes care of
-the uncommitted case by committing to the worker's branch first.
+**Finishing a piece is three steps, in this order:** `crew stop <worker>`,
+`crew reap --apply`, `crew merge <branch>`.
+
+Workers normally leave their changes uncommitted, and reap is what commits
+them, so reaping comes before merging. Reap will not touch a worktree whose
+agent is still running, which is why stop comes first. Stop prints the branch
+and the exact merge command to follow with.
+
+If a worker committed its own work, `crew merge <worker>` also works directly,
+before stopping it. Merge takes a worker name or a branch, so it keeps working
+after the worker is gone.
+
+Each step refuses rather than guesses: merge will not run while the worker is
+working, into a checkout with tracked changes, or while its worktree still
+holds uncommitted work that is not on the branch.
 
 **Interrupting `crew wait` costs nothing.** It prints a change before marking
 it seen, so stopping it mid-wait can at worst repeat something, never lose it.

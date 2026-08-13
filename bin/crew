@@ -497,6 +497,14 @@ def cmd_spawn(args, cfg):
         log(f"  its tab is still open so you can see what happened: {title}")
         return 1
 
+    where = worker_dir(name, workers().get(name, {}), hook_sessions())
+    branch = worker_branch(where) if where and os.path.isdir(where) else None
+    if branch:
+        # Recorded now because merge must still work after the worktree is
+        # removed, and reap removes it.
+        rec = workers().get(name, {})
+        rec["branch"] = branch
+        put_worker(name, rec)
     log(f"worker {name} ready in {os.path.relpath(cwd, repo) or '.'}")
     if args.task and not args.no_task:
         ok, why = deliver(ws, surface, args.task, spec)
@@ -929,6 +937,7 @@ def cmd_stop(args, cfg):
     log(f"stopped {args.worker}, it was {state}")
     if branch:
         log(f"  its work is on {branch}")
+        log(f"  crew reap --apply, then crew merge {branch}")
     log(f"  its worktree is still at {where}. crew reap removes it, "
         "committing anything uncommitted first.")
     return 0
@@ -940,30 +949,47 @@ def cmd_merge(args, cfg):
     Refuses rather than guesses. A merge that goes wrong mid-way is much
     harder to explain than one that never started.
     """
+    repo = os.getcwd()
     w = workers().get(args.worker)
-    if not w:
-        die(f"no worker called {args.worker}")
-    sessions = hook_sessions()
-    state, _ = worker_state(w, sessions)
-    if state == "running" and not args.force:
-        die(f"{args.worker} is still working. Merging now takes a half-written "
-            "state. Wait for idle, or pass --force.", 1)
+    if w:
+        repo = w.get("repo") or repo
+        sessions = hook_sessions()
+        state, _ = worker_state(w, sessions)
+        if state == "running" and not args.force:
+            die(f"{args.worker} is still working. Merging now takes a "
+                "half-written state. Wait for idle, or pass --force.", 1)
 
-    where = worker_dir(args.worker, w, sessions)
-    if not where or not os.path.isdir(where):
-        die(f"{args.worker} has no worktree left to merge from", 1)
-    branch = worker_branch(where)
-    if not branch:
-        die(f"{args.worker} is on a detached HEAD, so there is no branch to "
-            "merge. crew reap saves that work to a branch first.", 1)
+        # The branch, not the worktree, is what gets merged. A worker whose
+        # worktree has already been reaped is still perfectly mergeable, and
+        # reaping is exactly what the advice below tells you to do.
+        where = worker_dir(args.worker, w, sessions)
+        branch = w.get("branch")
+        if where and os.path.isdir(where):
+            branch = worker_branch(where) or branch
+            rc, dirty = run(["git", "-C", where, "--no-optional-locks",
+                             "status", "--porcelain"])
+            if dirty:
+                die(f"{args.worker} has {len(dirty.splitlines())} uncommitted "
+                    "file(s), which are not on its branch yet. Commit them, or "
+                    "run crew reap, which commits them for you. Merge works "
+                    "either way, including after the worktree is gone.", 1)
+        if not branch:
+            die(f"{args.worker} has no branch recorded and no worktree left, "
+                "so there is nothing to merge.", 1)
+    else:
+        # Not a live worker. Treat it as a branch, which is what `crew stop`
+        # prints when it forgets one.
+        branch = args.worker
+        rc, _ = run(["git", "-C", repo, "rev-parse", "--verify",
+                     f"refs/heads/{branch}"])
+        if rc != 0:
+            die(f"no worker or branch called {args.worker}")
+    rc, _ = run(["git", "-C", repo, "rev-parse", "-q", "--verify", "MERGE_HEAD"])
+    if rc == 0:
+        die(f"a merge is already in progress in {repo}. Finish it, or run "
+            f"git -C {repo} merge --abort. Until then nothing else can be "
+            "merged.", 1)
 
-    rc, dirty = run(["git", "-C", where, "--no-optional-locks", "status",
-                     "--porcelain"])
-    if dirty:
-        die(f"{args.worker} has {len(dirty.splitlines())} uncommitted file(s). "
-            "Run crew reap to commit them to its branch, then merge.", 1)
-
-    repo = w.get("repo") or os.getcwd()
     # Tracked changes only. Untracked files do not conflict with a merge, git
     # refuses on its own if one would be overwritten, and crew's own worktree
     # directory lives here untracked, which would otherwise make every repo
@@ -977,7 +1003,7 @@ def cmd_merge(args, cfg):
 
     into = worker_branch(repo) or "HEAD"
     rc, out = run(["git", "-C", repo, "merge", "--no-ff", branch, "-m",
-                   f"Merge {branch}: {w.get('task', '')[:60]}"])
+                   f"Merge {branch}: {(w or {}).get('task', '')[:60]}"])
     if rc != 0:
         log(f"merge of {branch} into {into} did not complete:")
         log(out)
@@ -987,8 +1013,9 @@ def cmd_merge(args, cfg):
         return 1
     log(f"merged {branch} into {into}")
     log(f"  {out.splitlines()[-1] if out else ''}")
-    log(f"  {args.worker} is still open. crew stop closes it, crew reap "
-        "removes its worktree.")
+    if w:
+        log(f"  {args.worker} is still open. crew stop closes it, crew reap "
+            "removes its worktree.")
     return 0
 
 
@@ -1079,7 +1106,7 @@ def main():
                     help="stop it even if it is mid-turn")
 
     mg = sub.add_parser("merge", help="merge a worker's branch into this repo")
-    mg.add_argument("worker")
+    mg.add_argument("worker", help="a worker name, or a branch if it is gone")
     mg.add_argument("--force", action="store_true",
                     help="merge even if the worker is still working")
 

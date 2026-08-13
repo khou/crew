@@ -211,6 +211,46 @@ class LiveTest(unittest.TestCase):
         with open(os.path.join(self.repo, "delivered.txt")) as fh:
             self.assertEqual(fh.read(), "from the worker")
 
+    def test_merge_works_after_the_worktree_has_been_reaped(self):
+        # The order that always works is stop, reap, merge: workers leave
+        # their changes uncommitted and reap is what commits them. So merge
+        # has to work from the branch alone, with no worktree left.
+        self.crew("spawn", "f", "a task", "--name", "m5", "--no-task")
+        wt = self.workers()["m5"]["cwd"]
+        self.commit_in(wt, "reaped.txt", "survived the reap")
+        branch = subprocess.run(["git", "-C", wt, "rev-parse", "--abbrev-ref",
+                                 "HEAD"], capture_output=True, text=True).stdout.strip()
+        self.crew("stop", "m5")
+        subprocess.run(["git", "-C", self.repo, "worktree", "remove", "--force",
+                        wt], capture_output=True)
+
+        p = self.crew("merge", branch)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        with open(os.path.join(self.repo, "reaped.txt")) as fh:
+            self.assertEqual(fh.read(), "survived the reap")
+
+    def test_merge_names_an_unfinished_merge_rather_than_blaming_you(self):
+        # Mid-conflict the checkout is dirty, so the plain dirty message would
+        # tell you to commit or stash, which is wrong and destructive advice
+        # while a merge is half-applied.
+        self.crew("spawn", "f", "a task", "--name", "m6", "--no-task")
+        wt = self.workers()["m6"]["cwd"]
+        self.commit_in(wt, "README.md", "worker's version")
+        self.commit_in(self.repo, "README.md", "the repo's version")
+        p = self.crew("merge", "m6")
+        self.assertNotEqual(p.returncode, 0, "expected a conflict")
+
+        p = self.crew("merge", "m6")
+        self.assertIn("merge is already in progress", p.stdout)
+        self.assertIn("merge --abort", p.stdout)
+        subprocess.run(["git", "-C", self.repo, "merge", "--abort"],
+                       capture_output=True)
+
+    def test_merge_rejects_a_name_that_is_neither_worker_nor_branch(self):
+        p = self.crew("merge", "not-a-thing")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("no worker or branch", p.stdout)
+
     def test_merge_refuses_while_the_worker_still_has_uncommitted_work(self):
         self.crew("spawn", "f", "a task", "--name", "m2", "--no-task")
         wt = self.workers()["m2"]["cwd"]
