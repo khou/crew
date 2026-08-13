@@ -119,6 +119,13 @@ Dry run is the default. Nothing is removed until you pass `--apply`.
 
 ## What it does to each worktree
 
+A known limit: a worker's own shell can outlive it. Closing a tab orphans the
+agent's helper processes, and one that has been reparented never exits, so it
+holds its worktree and reap keeps skipping it. Most clear within about two
+minutes; a stuck one needs killing by hand. reap will never remove a directory
+something is using, which is the behaviour you want even when it is
+inconvenient.
+
 1. Skips it if anything is using it: a live process with its working directory
    inside, a live session in a tool's session registry, a git lock naming a
    live pid, or git metadata touched in the last hour.
