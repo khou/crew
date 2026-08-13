@@ -88,8 +88,12 @@ AGENTS = {
             "full": ["--permission-mode", "bypassPermissions"],
         },
         "ready": [r"shift\+tab to cycle", r"for shortcuts"],
+        # Tied to the instruction wording claude actually uses, not the bare
+        # token: a line-anchored "/login" still matched a worker's own text
+        # about a web app's /login route once terminal wrapping put that
+        # route alone on a visual line.
         "blocked": [r"Yes, I trust this folder", r"Workspace trust not yet accepted",
-                    r"Press any key to log in", r"/login", r"Invalid API key"],
+                    r"Press any key to log in", r"Please run /login", r"Invalid API key"],
         # A routine permission prompt, which the director answers on the
         # user's behalf when auto_approve is on. Distinct from blocked, which
         # is never answered automatically no matter what.
