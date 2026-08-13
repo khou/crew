@@ -933,6 +933,19 @@ def refresh(all_w, sessions, cfg):
     return out
 
 
+def current_state(name, w, sessions, cfg):
+    """One worker's state, idle-cursor detection included.
+
+    say, stop and merge used to read worker_state() raw, so a quiet
+    screen-lifecycle worker that status and wait already called idle still
+    looked like it was mid-turn to them. Stalled maps back to running: it is
+    still an active, mid-turn process, just a stuck one, not a safe target
+    for a plain say/stop/merge.
+    """
+    state = refresh({name: w}, sessions, cfg)[name][0]
+    return "running" if state == "stalled" else state
+
+
 def cmd_wait(args, cfg):
     """Block until a worker needs the director, then say which and why.
 
@@ -1110,7 +1123,7 @@ def cmd_stop(args, cfg):
     if not w:
         die(f"no worker called {args.worker}")
     sessions = hook_sessions()
-    state, _ = worker_state(w, sessions)
+    state = current_state(args.worker, w, sessions, cfg)
     if state == "running" and not args.force:
         die(f"{args.worker} is mid-turn. Wait for it, or pass --force to stop "
             "it anyway. Anything it has written is kept either way.", 1)
@@ -1163,7 +1176,7 @@ def cmd_merge(args, cfg):
     if w:
         repo = w.get("repo") or repo
         sessions = hook_sessions()
-        state, _ = worker_state(w, sessions)
+        state = current_state(args.worker, w, sessions, cfg)
         if state == "running" and not args.force:
             die(f"{args.worker} is still working. Merging now takes a "
                 "half-written state. Wait for idle, or pass --force.", 1)
@@ -1321,9 +1334,10 @@ def cmd_say(args, cfg):
     s = sessions.get(w["surface"], {})
     if s and not pid_alive(s.get("pid")):
         die(f"{args.worker} is not running. Its tab is still open.", 1)
-    if s.get("state") == "running" and not args.now:
+    state = current_state(args.worker, w, sessions, cfg)
+    if state == "running" and not args.now:
         die(f"{args.worker} is mid-turn. Wait for idle, or pass --now to interrupt.", 1)
-    if args.now and s.get("state") == "running":
+    if args.now and state == "running":
         cmux("send-key", "--workspace", w["workspace"], "--surface", w["surface"],
              "escape")
         time.sleep(1)
