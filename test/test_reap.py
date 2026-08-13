@@ -162,6 +162,29 @@ class ReapTest(unittest.TestCase):
         self.assertEqual(git(self.repo, "rev-parse", "crew-rescued/orphan-clean"),
                          sha)
 
+    def test_a_colliding_rescue_branch_blocks_removal(self):
+        # A rescue branch from an earlier reap can already occupy
+        # crew-rescued/<name> pointing at a different commit. Removing the
+        # worktree anyway would make its detached commit unreachable.
+        wt = self.worktree("orphan-collide", detach=True)
+        self.write("orphan.md", "unreachable if removed", root=wt)
+        git(wt, "add", "-A")
+        git(wt, "commit", "-qm", "detached work")
+        detached_sha = git(wt, "rev-parse", "HEAD")
+
+        git(self.repo, "branch", "crew-rescued/orphan-collide", "main")
+        collider_sha = git(self.repo, "rev-parse", "crew-rescued/orphan-collide")
+        self.assertNotEqual(detached_sha, collider_sha)
+
+        self.reap("--apply")
+
+        self.assertTrue(os.path.isdir(wt),
+                        "worktree was removed despite a colliding rescue branch")
+        self.assertEqual(git(self.repo, "rev-parse", "crew-rescued/orphan-collide"),
+                         collider_sha, "the colliding branch was moved")
+        self.assertEqual(git(wt, "rev-parse", "HEAD"), detached_sha,
+                         "the detached commit is no longer reachable from the worktree")
+
     def test_a_lock_set_by_a_person_is_obeyed(self):
         # Found by review: any lock without a live pid was cleared and the
         # worktree removed, which defeats the point of locking one.
@@ -201,6 +224,14 @@ class ReapTest(unittest.TestCase):
         self.write("huge.bin", "x" * (2 * 1024 * 1024), root=wt)
         out = self.reap("--apply")
         self.assertTrue(os.path.isdir(wt), "worktree with an oversized file was removed")
+        self.assertIn("over the 1MB per-file limit", out)
+
+    def test_oversized_unicode_named_file_is_refused_and_worktree_kept(self):
+        self.config({"max_file_mb": 1})
+        wt = self.worktree("heavy-unicode")
+        self.write("文件.bin", "x" * (2 * 1024 * 1024), root=wt)
+        out = self.reap("--apply")
+        self.assertTrue(os.path.isdir(wt), "worktree with an oversized Unicode-named file was removed")
         self.assertIn("over the 1MB per-file limit", out)
 
     def test_worktree_in_use_is_skipped(self):
