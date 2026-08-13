@@ -85,14 +85,19 @@ AGENTS = {
     },
     "codex": {
         "bin": "codex",
-        # No worktree flag, so crew makes one. Codex then wants the directory
-        # trusted, granted per invocation rather than by editing its config.
+        # No worktree flag, so crew makes one.
         "worktree": "crew",
+        # There is no flag that grants directory trust. Measured: an
+        # interactive session in a directory codex has not seen shows its
+        # trust prompt even when passed
+        # -c projects."<dir>".trust_level="trusted". Trust is inherited from a
+        # trusted parent, so trusting the repo once covers every worktree crew
+        # makes under it. See "First run in a repo" in the README.
+        #
         # --approve-for-me already implies the workspace-write sandbox, and
         # codex rejects both together.
         "args": ["-m", "{model}",
-                 "-c", 'model_reasoning_effort="{effort}"',
-                 "-c", 'projects."{cwd}".trust_level="trusted"'],
+                 "-c", 'model_reasoning_effort="{effort}"'],
         "permission": {
             "plan": ["--sandbox", "read-only", "--ask-for-approval", "never"],
             "edit": ["--approve-for-me"],

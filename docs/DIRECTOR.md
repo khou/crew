@@ -55,6 +55,11 @@ in `~/.config/crew/crew.json`; nothing about these three is special.
 **One task per worker.** A worker with two jobs does neither well, and you
 cannot tell which one it is stuck on.
 
+**A worker blocked on trust needs the human once.** The first time a repo is
+used, Claude and Codex ask whether the directory is trusted. crew reports that
+and types nothing. Tell the human to run that agent in the repo once and
+accept. Every worktree under it is covered afterwards.
+
 **Never type into a stuck worker.** If `crew spawn` says a worker is blocked, it
 is showing something only the human can answer, usually a login screen. crew
 deliberately sends no keystrokes there, and neither should you. Tell the human

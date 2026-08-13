@@ -149,12 +149,16 @@ class LaunchTest(unittest.TestCase):
             leftover = [a for a in argv if "{" in a or "}" in a]
             self.assertEqual(leftover, [], f"{agent}: unsubstituted placeholder")
 
-    def test_codex_is_told_to_trust_the_directory_crew_made(self):
-        # crew creates codex's worktree, and codex refuses to run in a
-        # directory it does not trust. The grant is per invocation so the
-        # user's config is never edited.
-        argv = self.argv("codex", model="m", effort="low", cwd="/tmp/wt")
-        self.assertIn('projects."/tmp/wt".trust_level="trusted"', argv)
+    def test_no_agent_claims_to_grant_its_own_directory_trust(self):
+        # Measured: codex shows its trust prompt in an unseen directory even
+        # when passed -c projects."<dir>".trust_level="trusted". Carrying a
+        # flag that does not work is worse than not carrying one, because it
+        # reads as handled.
+        for agent in self.crew.AGENTS:
+            argv = self.argv(agent, model="m", effort="e", worktree="w",
+                             cwd="/tmp/wt", name="n")
+            self.assertNotIn("trust_level", " ".join(argv),
+                             f"{agent} carries a trust grant that does not work")
 
     def test_every_agent_defines_all_three_permission_levels(self):
         for agent, spec in self.crew.AGENTS.items():
