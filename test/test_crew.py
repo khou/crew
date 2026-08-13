@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 import tempfile
 import types
@@ -151,6 +152,49 @@ class WorkerDirTest(unittest.TestCase):
         sessions = {"s": {"cwd": "/from/session"}}
         got = self.crew.worker_dir("nosuchworker", w, sessions)
         self.assertEqual(got, "/fallback")
+
+
+class WorkerStateRaceTest(unittest.TestCase):
+    """crew stop dropping a worker must stick, even against a concurrent
+    refresh that is still writing from a snapshot taken before the stop."""
+
+    def setUp(self):
+        self.crew = crew_module()
+        self.tmp = tempfile.mkdtemp(prefix="crew-state-race-")
+        self.crew.STATE_PATH = os.path.join(self.tmp, "workers.json")
+        self.crew.put_worker("w1", {"task": "t"}, create=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_a_stopped_worker_does_not_reappear_from_a_stale_refresh(self):
+        stale_snapshot = threading.Event()
+        stopped = threading.Event()
+
+        # A status refresh reads the worker before crew stop runs, then is
+        # slow enough to write its (now stale) copy back after the stop has
+        # already removed it.
+        def refresh_process():
+            stale = self.crew.workers()["w1"]
+            stale_snapshot.set()
+            stopped.wait(timeout=5)
+            self.crew.put_worker("w1", stale)
+
+        def stop_process():
+            stale_snapshot.wait(timeout=5)
+            self.crew.drop_worker("w1")
+            stopped.set()
+
+        t1 = threading.Thread(target=refresh_process)
+        t2 = threading.Thread(target=stop_process)
+        t1.start()
+        t2.start()
+        t1.join(timeout=5)
+        t2.join(timeout=5)
+
+        self.assertNotIn("w1", self.crew.workers(),
+                         "a stale refresh resurrected a worker crew stop had "
+                         "just dropped")
 
 
 class MergeSelfTest(unittest.TestCase):
