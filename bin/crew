@@ -1004,14 +1004,15 @@ def cmd_install(args, cfg):
     Symlinks rather than copies, so pulling the repo updates the installed
     commands and there is never a stale second copy to be confused by.
     """
-    here = os.path.dirname(os.path.abspath(__file__))
+    here = os.path.dirname(os.path.realpath(__file__))
     target = os.path.expanduser(args.prefix)
     tools = ["crew", "crew-reap"]
 
     if args.uninstall:
         for name in tools:
             link = os.path.join(target, name)
-            if os.path.islink(link) and os.path.realpath(link).startswith(here):
+            source = os.path.join(here, name)
+            if os.path.islink(link) and os.path.realpath(link) == os.path.realpath(source):
                 os.remove(link)
                 log(f"removed {link}")
             elif os.path.exists(link):
