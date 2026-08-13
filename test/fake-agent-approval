@@ -1,0 +1,21 @@
+#!/bin/bash
+# Reaches its prompt, asks a routine permission question, and clears it once
+# answered, the way a real agent redraws. Echoes which option was chosen so a
+# test can tell an approval from silence.
+show_prompt() {
+  echo "Do you want to proceed?"
+  echo " 1. Yes"
+  echo " 2. Yes, and don't ask again"
+}
+echo "ready for shortcuts"
+show_prompt
+while IFS= read -r line; do
+  case "$line" in
+    1|2)
+      printf '\033[2J\033[H'
+      echo "APPROVED-$line"
+      echo "ready for shortcuts"
+      ;;
+    *) echo "GOT: $line" ;;
+  esac
+done

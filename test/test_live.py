@@ -280,6 +280,40 @@ class LiveTest(unittest.TestCase):
         p = self.crew("merge", "m4")
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
 
+    def test_wait_answers_a_routine_permission_prompt_itself(self):
+        # The director is the only thing that should interrupt the person, so
+        # "may I run this" is answered rather than relayed.
+        spec = fake("fake-agent-approval", approval={
+            "prompt": [r"Do you want to proceed"], "always": "2", "once": "1"})
+        self.write_config({
+            "agents": {"appr": spec},
+            "roles": {"a": {"agent": "appr", "permission": "edit"}},
+            "ready_timeout": 25, "auto_approve": True,
+        })
+        self.crew("spawn", "a", "a task", "--name", "ap1", "--no-task")
+        self.fake_session("ap1", "needsInput")
+        p = self.crew("wait", "--timeout", "12")
+        self.assertIn("approved its permission request", p.stdout,
+                      p.stdout + p.stderr)
+        self.assertIn("APPROVED-2", self.screen("ap1"))
+
+    def test_a_login_screen_is_never_answered_automatically(self):
+        # The same prompt-shaped screen, but it is a login. Answering one
+        # starts a browser sign-in flow and can clear stored credentials.
+        spec = fake("fake-agent-approval", approval={
+            "prompt": [r"Do you want to proceed"], "always": "2", "once": "1"},
+            blocked=[r"Press any key to log in", r"Do you want to proceed"])
+        self.write_config({
+            "agents": {"appr": spec},
+            "roles": {"a": {"agent": "appr", "permission": "edit"}},
+            "ready_timeout": 25, "auto_approve": True,
+        })
+        self.crew("spawn", "a", "a task", "--name", "ap2", "--no-task")
+        self.fake_session("ap2", "needsInput")
+        self.crew("wait", "--timeout", "8")
+        self.assertNotIn("APPROVED", self.screen("ap2"),
+                         "a blocked screen was answered automatically")
+
     def test_show_prints_what_a_worker_is_asking(self):
         # status says a worker is waiting. This is how the director finds out
         # what it is waiting for, which is the whole of "surface it to the

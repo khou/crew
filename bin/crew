@@ -11,6 +11,7 @@ than an API key.
   crew spawn <role> <task> open a worker tab and wait until it is ready
   crew status              what every worker is doing
   crew wait                block until a worker goes idle or needs you
+  crew approve <worker>    answer a worker's permission prompt
   crew show <worker>       read what a worker is showing, and asking
   crew say <worker> <text> deliver a message, safely
   crew merge <worker>      merge a worker's branch into this repo
@@ -83,6 +84,20 @@ AGENTS = {
         "ready": [r"shift\+tab to cycle", r"for shortcuts"],
         "blocked": [r"Yes, I trust this folder", r"Workspace trust not yet accepted",
                     r"Press any key to log in", r"/login", r"Invalid API key"],
+        # A routine permission prompt, which the director answers on the
+        # user's behalf when auto_approve is on. Distinct from blocked, which
+        # is never answered automatically no matter what.
+        "approval": {
+            "prompt": [r"Do you want to proceed\?", r"requires approval"],
+            "always": "2", "once": "1",
+        },
+        # The director is the only thing that should interrupt the user, so a
+        # worker's own notifications are turned off. Verified that --settings
+        # merges rather than replaces: the cmux hooks a worker needs still
+        # register, so crew can still see it.
+        "quiet_args": ["--settings",
+                       '{"inputNeededNotifEnabled":false,'
+                       '"agentPushNotifEnabled":false}'],
     },
     "codex": {
         "bin": "codex",
@@ -157,6 +172,13 @@ DEFAULTS = {
     # For agents whose reported lifecycle is unreliable, how long a screen must
     # hold still before the worker counts as idle rather than working.
     "screen_idle_seconds": 20,
+    # Answer workers' routine permission prompts instead of stopping to ask.
+    # The point of a fleet is that it runs; a director that relays every
+    # "may I run ls" is worse than no fleet at all. Anything in an agent's
+    # blocked list is never answered this way: a login or a trust dialog is a
+    # decision only the person can make, and answering one automatically
+    # would be answering it wrongly.
+    "auto_approve": True,
 }
 
 # Signs a session has run out of plan allowance. Deliberately broad, because
@@ -814,6 +836,20 @@ def wait_loop(args, cfg):
         sessions = hook_sessions()
         changed = []
         for name, (state, w) in sorted(refresh(all_w, sessions, cfg).items()):
+            if state == "needsInput" and cfg.get("auto_approve", True):
+                # A worker waiting on "may I run this" is not news. Answer it
+                # and let it get on with the work. Only what a person must
+                # decide reaches the director.
+                spec = cfg["agents"].get(w["agent"], {})
+                ok, why = approve(w["workspace"], w["surface"], spec)
+                if ok:
+                    log(f"{name:28} approved its permission request")
+                    continue
+                if why == "no permission prompt is showing":
+                    # The agent said it needs input a moment before drawing
+                    # the prompt. Look again next time round rather than
+                    # waking the director for something about to be handled.
+                    continue
             if state != w.get("seen") and state in interesting:
                 changed.append((name, state, w))
         if changed:
@@ -1019,6 +1055,52 @@ def cmd_merge(args, cfg):
     return 0
 
 
+def approve(ws, surface, spec, always=True):
+    """Answer a worker's routine permission prompt.
+
+    Returns (answered, why). Refuses on anything in the agent's blocked list:
+    those are logins and trust dialogs, where a keystroke can start a browser
+    sign-in flow or grant access the person never agreed to.
+    """
+    rules = spec.get("approval") or {}
+    if not rules:
+        return False, "this agent has no approval prompt defined"
+    screen = read_screen(ws, surface, 40)
+    if not screen.strip():
+        return False, "nothing on screen"
+    for pat in spec.get("blocked", []):
+        if re.search(pat, screen):
+            return False, ("it is showing something only a person can answer "
+                           f"({pat}), so nothing was sent")
+    if not any(re.search(p, screen) for p in rules.get("prompt", [])):
+        return False, "no permission prompt is showing"
+
+    # Typed as text then submitted, the same way a message is delivered.
+    # One mechanism, already proven against both real agents and the tests.
+    key = rules.get("always" if always else "once") or "1"
+    cmux("send", "--workspace", ws, "--surface", surface, key)
+    time.sleep(0.4)
+    cmux("send-key", "--workspace", ws, "--surface", surface, "enter")
+    time.sleep(1.5)
+    after = read_screen(ws, surface, 40)
+    if any(re.search(p, after) for p in rules.get("prompt", [])):
+        return False, "the prompt is still showing after answering it"
+    return True, ""
+
+
+def cmd_approve(args, cfg):
+    w = workers().get(args.worker)
+    if not w:
+        die(f"no worker called {args.worker}")
+    spec = cfg["agents"].get(w["agent"], {})
+    ok, why = approve(w["workspace"], w["surface"], spec, always=not args.once)
+    if not ok:
+        die(f"did not approve {args.worker}: {why}", 1)
+    log(f"approved {args.worker}"
+        + ("" if args.once else ", and told it not to ask again for that"))
+    return 0
+
+
 def cmd_show(args, cfg):
     """Print what a worker's tab is showing.
 
@@ -1110,6 +1192,11 @@ def main():
     mg.add_argument("--force", action="store_true",
                     help="merge even if the worker is still working")
 
+    ap_ = sub.add_parser("approve", help="answer a worker's permission prompt")
+    ap_.add_argument("worker")
+    ap_.add_argument("--once", action="store_true",
+                     help="allow just this one, rather than not asking again")
+
     sh = sub.add_parser("show", help="read a worker's screen")
     sh.add_argument("worker")
     sh.add_argument("--lines", type=int, default=40)
@@ -1135,7 +1222,7 @@ def main():
         "install": cmd_install, "doctor": cmd_doctor, "spawn": cmd_spawn,
         "status": cmd_status,
         "wait": cmd_wait, "say": cmd_say, "show": cmd_show, "stop": cmd_stop,
-        "merge": cmd_merge, "reap": cmd_reap,
+        "merge": cmd_merge, "approve": cmd_approve, "reap": cmd_reap,
     }[args.cmd](args, cfg)
 
 
