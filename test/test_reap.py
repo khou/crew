@@ -226,6 +226,14 @@ class ReapTest(unittest.TestCase):
         self.assertTrue(os.path.isdir(wt), "worktree with an oversized file was removed")
         self.assertIn("over the 1MB per-file limit", out)
 
+    def test_oversized_unicode_named_file_is_refused_and_worktree_kept(self):
+        self.config({"max_file_mb": 1})
+        wt = self.worktree("heavy-unicode")
+        self.write("文件.bin", "x" * (2 * 1024 * 1024), root=wt)
+        out = self.reap("--apply")
+        self.assertTrue(os.path.isdir(wt), "worktree with an oversized Unicode-named file was removed")
+        self.assertIn("over the 1MB per-file limit", out)
+
     def test_worktree_in_use_is_skipped(self):
         wt = self.worktree("busy")
         proc = subprocess.Popen(["python3", "-c", "import time; time.sleep(60)"], cwd=wt)
