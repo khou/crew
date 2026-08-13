@@ -82,21 +82,6 @@ Define roles your project needs, and they travel with it:
 `permission` is `plan` (read only), `edit` (change files in its own worktree)
 or `full`. See [docs/PERMISSIONS.md](docs/PERMISSIONS.md).
 
-## Driving it yourself
-
-You do not have to go through a director:
-
-```sh
-crew spawn worker "add the retry path"   # open a worker, wait until it is ready
-crew status                              # who is working, idle or stuck
-crew wait                                # block until one needs you
-crew say <worker> "also cover timeouts"
-crew show <worker>                       # read what it is showing
-crew stop <worker>                       # close its tab, keeping its work
-crew reap --apply                        # remove finished worktrees
-crew merge <branch>                      # bring the work in
-```
-
 ## Where things are
 
 ```
