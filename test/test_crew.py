@@ -144,6 +144,51 @@ class WorkerDirTest(unittest.TestCase):
         self.assertEqual(got, "/fallback")
 
 
+class MergeSelfTest(unittest.TestCase):
+    """A worker that resolves to the primary checkout has nothing to merge.
+
+    A worker registered without its own worktree resolves to the checkout
+    you are merging into. Merging its branch into that same checkout is a
+    merge of a branch into itself: git reports "Already up to date" and
+    crew must not read that as a successful merge of the worker's work.
+    """
+
+    def setUp(self):
+        self.crew = crew_module()
+        self.tmp = tempfile.mkdtemp(prefix="crew-selfmerge-")
+        self.repo = os.path.join(self.tmp, "repo")
+        os.makedirs(self.repo)
+        for cmd in (["init", "-q", "-b", "main"],):
+            subprocess.run(["git", *cmd], cwd=self.repo, capture_output=True)
+        with open(os.path.join(self.repo, "f.txt"), "w") as fh:
+            fh.write("x")
+        subprocess.run(["git", "add", "-A"], cwd=self.repo, capture_output=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "-qm", "i"], cwd=self.repo, capture_output=True)
+        self.crew.hook_sessions = lambda: {}
+        self.crew.worker_state = lambda w, sessions: ("idle", {})
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_merge_refuses_when_the_worker_resolves_to_the_primary_checkout(self):
+        w = {"repo": self.repo, "cwd": self.repo, "surface": "s",
+             "branch": "main", "task": "self merge"}
+        self.crew.workers = lambda: {"w1": w}
+        args = types.SimpleNamespace(worker="w1", force=False)
+        cwd = os.getcwd()
+        os.chdir(self.repo)
+        try:
+            with self.assertRaises(SystemExit):
+                self.crew.cmd_merge(args, {})
+        finally:
+            os.chdir(cwd)
+        out = subprocess.run(["git", "-C", self.repo, "log", "--oneline"],
+                             capture_output=True, text=True).stdout
+        self.assertEqual(len(out.strip().splitlines()), 1,
+                         "no merge commit should have been created")
+
+
 class ScreenLifecycleTest(unittest.TestCase):
     """Agents whose reported lifecycle never changes."""
 

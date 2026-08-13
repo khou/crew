@@ -1105,6 +1105,11 @@ def cmd_merge(args, cfg):
         # worktree has already been reaped is still perfectly mergeable, and
         # reaping is exactly what the advice below tells you to do.
         where = worker_dir(args.worker, w, sessions)
+        if where and os.path.isdir(where) and \
+                os.path.realpath(where) == os.path.realpath(repo):
+            die(f"{args.worker}'s worktree resolved to {repo}, the same "
+                "checkout you are merging into. There is no separate branch "
+                "to merge.", 1)
         branch = w.get("branch")
         if where and os.path.isdir(where):
             branch = worker_branch(where) or branch
@@ -1144,6 +1149,9 @@ def cmd_merge(args, cfg):
             "with the worker's. Commit or stash first.", 1)
 
     into = worker_branch(repo) or "HEAD"
+    if branch == into:
+        die(f"{branch} is already the branch checked out in {repo}. There is "
+            "nothing to merge into itself.", 1)
     rc, out = run(["git", "-C", repo, "merge", "--no-ff", branch, "-m",
                    f"Merge {branch}: {(w or {}).get('task', '')[:60]}"])
     if rc != 0:
