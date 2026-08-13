@@ -13,6 +13,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import shutil
 import tempfile
 import unittest
 
@@ -25,6 +26,64 @@ def crew_module():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+class DeathTest(unittest.TestCase):
+    """A worker that died must never look alive.
+
+    The tab drops to a shell when the agent exits, and a shell echoes anything
+    typed at it, so nothing on screen distinguishes a dead worker's prompt from
+    a live agent's composer. Only a recorded exit does.
+    """
+
+    def setUp(self):
+        self.crew = crew_module()
+        self.tmp = tempfile.mkdtemp(prefix="crew-death-")
+        self.crew.EXIT_DIR = self.tmp
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def mark(self, surface, status):
+        with open(os.path.join(self.tmp, f"{surface}.exit"), "w") as fh:
+            fh.write(str(status))
+
+    def test_a_live_worker_has_no_exit_recorded(self):
+        self.assertIsNone(self.crew.exited("s1"))
+
+    def test_an_exit_is_read_back(self):
+        self.mark("s1", 3)
+        self.assertEqual(self.crew.exited("s1"), 3)
+
+    def test_a_clean_exit_still_counts_as_gone(self):
+        # Status 0 is falsy. Treating it as "no exit recorded" would make a
+        # worker that quit normally look like it was still running.
+        self.mark("s1", 0)
+        self.assertEqual(self.crew.exited("s1"), 0)
+
+    def test_a_recorded_exit_beats_a_hook_store_that_says_running(self):
+        self.mark("s1", 137)
+        sessions = {"s1": {"pid": os.getpid(), "state": "running"}}
+        state, _ = self.crew.worker_state({"surface": "s1", "started": 0}, sessions)
+        self.assertEqual(state, "gone")
+
+    def test_the_wrapper_records_the_exit_before_dropping_to_a_shell(self):
+        marker = self.crew.exit_marker("s1")
+        script = self.crew_launch_script("s1")
+        self.assertIn(marker, script)
+        self.assertLess(script.index(marker), script.index("exec /bin/zsh -i"),
+                        "the shell starts before the exit is recorded")
+
+    def test_the_wrapper_avoids_zsh_read_only_names(self):
+        # $status is read-only in zsh; assigning to it aborts the whole wrapper
+        # and the tab dies with the evidence.
+        self.assertNotIn("status=$?", self.crew_launch_script("s1"))
+
+    def crew_launch_script(self, surface):
+        captured = {}
+        self.crew.cmux = lambda *a, **k: (captured.update(cmd=a), (0, ""))[1]
+        self.crew.launch("ws", surface, "/tmp", ["/bin/true"], {})
+        return " ".join(captured["cmd"])
 
 
 class LaunchTest(unittest.TestCase):

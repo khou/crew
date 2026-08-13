@@ -153,6 +153,26 @@ class LiveTest(unittest.TestCase):
         # with it. The evidence has to stay on screen.
         self.assertIn("agent exited with status 3", self.screen("w5"))
 
+    def test_say_never_types_into_the_shell_a_dead_agent_left_behind(self):
+        # The worst case is not a worker that is merely gone. It is a tab
+        # sitting at a shell prompt: a shell echoes whatever is typed at it,
+        # so "the text appeared on screen" cannot tell a composer from a
+        # command line, and pressing Enter runs the message.
+        #
+        # Nothing recorded a hook session here, because the agent died before
+        # one existed, which is exactly the case the pid check cannot cover.
+        marker = os.path.join(self.tmp, "executed")
+        self.crew("spawn", "fcrash", "task")
+        self.assertIn("fcrash", " ".join(self.workers()), "worker was not registered")
+        name = next(iter(self.workers()))
+
+        p = self.crew("say", name, f"touch {marker}")
+        time.sleep(1.5)
+
+        self.assertFalse(os.path.exists(marker),
+                         "the message was executed as a shell command")
+        self.assertNotEqual(p.returncode, 0, "say reported success to a dead worker")
+
     def test_say_delivers_to_a_ready_worker(self):
         self.crew("spawn", "f", "first", "--name", "w6", "--no-task")
         p = self.crew("say", "w6", "second message")

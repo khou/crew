@@ -33,6 +33,10 @@ STATE_PATH = os.environ.get(
     "CREW_STATE", os.path.join(HOME, ".local", "state", "crew", "workers.json"))
 # cmux writes one of these per agent. Overridable so tests can supply their own.
 HOOKS_DIR = os.environ.get("CREW_HOOKS_DIR", os.path.join(HOME, ".cmuxterm"))
+# One file per surface, written by the worker's own tab the moment its agent
+# exits. The hook store cannot cover this: an agent that dies before its first
+# hook fires never appears there at all.
+EXIT_DIR = os.path.join(os.path.dirname(STATE_PATH), "exited")
 
 REQUIRED_BINARIES = ("git", "cmux")
 
@@ -490,12 +494,23 @@ def launch(ws, surface, cwd, argv, spec):
     A pane whose command exits is closed by cmux, so a worker that dies on
     startup would vanish with its error message. The trailing shell keeps the
     evidence on screen.
+
+    That shell is also a hazard: it echoes anything typed at it, so no amount
+    of looking at the screen can tell a dead worker's prompt from a live
+    agent's composer, and submitting there runs the message as a command. The
+    tab records its own death in a file first, which is the only signal that
+    cannot be faked by what happens to be on screen.
     """
     quoted = " ".join(shell_quote(a) for a in argv)
     unset = "".join(f"unset {v}; " for v in spec.get("env_unset", []))
+    marker = exit_marker(surface)
+    os.makedirs(EXIT_DIR, exist_ok=True)
+    if os.path.exists(marker):
+        os.remove(marker)
     inner = (f'export PATH="$PATH:{inherited_path()}"; {unset}'
              f"cd {shell_quote(cwd)} || exit 1; {quoted}; "
-             f"printf '\\n[crew] agent exited with status %s\\n' \"$?\"; "
+             f"crew_rc=$?; echo $crew_rc > {shell_quote(marker)}; "
+             f"printf '\\n[crew] agent exited with status %s\\n' \"$crew_rc\"; "
              f"exec /bin/zsh -i")
     # Deliberately not a login shell. A login shell rebuilds PATH and the
     # pane's own wrapper loses to the real binary, which costs the worker its
@@ -560,6 +575,11 @@ def deliver(ws, surface, text, spec):
     the tab is a shell prompt, and submitting there would run the message as
     a command.
     """
+    status = exited(surface)
+    if status is not None:
+        return False, (f"the agent exited with status {status}; its tab is a "
+                       "shell prompt and the message would have been run as a "
+                       "command")
     one_line = " ".join(text.split())
     rc, out = cmux("send", "--workspace", ws, "--surface", surface, one_line)
     if rc != 0:
@@ -623,11 +643,28 @@ def screen_fingerprint(text):
     return hashlib.sha1(" ".join(text.split()).encode()).hexdigest()
 
 
+def exit_marker(surface):
+    return os.path.join(EXIT_DIR, f"{surface}.exit")
+
+
+def exited(surface):
+    """The status an agent exited with, or None if it is still running."""
+    try:
+        with open(exit_marker(surface)) as fh:
+            return int(fh.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
 def worker_state(w, sessions):
     """One worker's state, from the terminal rather than from the worker.
 
     A worker that crashed or wedged cannot report that, so this never asks it.
     """
+    # Checked before the hook store, which knows nothing about an agent that
+    # died before its first hook fired.
+    if exited(w["surface"]) is not None:
+        return "gone", sessions.get(w["surface"], {})
     s = sessions.get(w["surface"], {})
     if not s:
         # No session recorded yet. Either it is still starting, or whatever
