@@ -153,6 +153,36 @@ class LiveTest(unittest.TestCase):
         # with it. The evidence has to stay on screen.
         self.assertIn("agent exited with status 3", self.screen("w5"))
 
+    def test_a_ready_agent_is_recognised_without_a_known_prompt(self):
+        # Claude's prompt wording changes with its permission mode, and a
+        # worker that was genuinely ready was reported as never starting
+        # because of it. A registered session plus a screen that has stopped
+        # changing says the same thing without depending on wording.
+        self.write_config({
+            "agents": {"quiet": fake("fake-agent-quiet",
+                                     args=[self.hooks],
+                                     ready=[r"this text never appears"])},
+            "roles": {"q": {"agent": "quiet", "permission": "edit"}},
+            "ready_timeout": 25,
+        })
+        p = self.crew("spawn", "q", "hello", "--no-task")
+        self.assertIn("ready", p.stdout, p.stdout + p.stderr)
+
+    def test_show_prints_what_a_worker_is_asking(self):
+        # status says a worker is waiting. This is how the director finds out
+        # what it is waiting for, which is the whole of "surface it to the
+        # human" rather than guessing.
+        self.crew("spawn", "f", "a task", "--no-task")
+        name = next(iter(self.workers()))
+        p = self.crew("show", name)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("for shortcuts", p.stdout,
+                      "show did not print the worker's screen")
+
+    def test_show_refuses_a_worker_that_is_not_there(self):
+        p = self.crew("show", "no-such-worker")
+        self.assertNotEqual(p.returncode, 0)
+
     def test_say_never_types_into_the_shell_a_dead_agent_left_behind(self):
         # The worst case is not a worker that is merely gone. It is a tab
         # sitting at a shell prompt: a shell echoes whatever is typed at it,

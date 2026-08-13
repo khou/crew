@@ -14,6 +14,7 @@ crew doctor                       # once, at the start of a session
 crew spawn <role> "<task>"        # open a worker and give it work
 crew status                       # who is working, idle, or stuck
 crew wait                         # block until one of them needs you
+crew show <worker>                # read what it is showing, and asking
 crew say <worker> "<message>"     # send a follow-up
 crew reap --apply                 # remove finished worktrees
 ```
@@ -83,6 +84,12 @@ match is a strong hint, a non-match tells you nothing.
 
 **Surface questions, do not invent answers.** When a worker needs a decision the
 human should make, ask the human. Guessing produces work that gets thrown away.
+
+**Read the question before passing it on.** `crew wait` tells you a worker is
+`needsInput`. It does not tell you what it wants. `crew show <worker>` prints
+its screen, which is where the question is. Put it to the human in your own
+words, with what the worker was doing and why it stopped. Never answer a
+permission prompt on the human's behalf.
 
 ## What you can rely on
 

@@ -1,0 +1,22 @@
+#!/bin/bash
+# An agent that is ready but says nothing crew recognises.
+#
+# Real agents word their prompt differently depending on permission mode and
+# change the wording between releases, so readiness cannot rest on matching
+# text alone. This one registers a session the way cmux's hooks do, draws a
+# screen that then stops changing, and never prints a known ready marker.
+#
+# $1 is where to write that session. The pane does not inherit crew's
+# environment, so it has to be passed in.
+hooks="$1"
+if [ -n "$hooks" ] && [ -n "$CMUX_SURFACE_ID" ]; then
+  mkdir -p "$hooks"
+  cat > "$hooks/quiet-hook-sessions.json" <<JSON
+{"sessions": {"q1": {"surfaceId": "$CMUX_SURFACE_ID", "agentLifecycle": "idle",
+ "pid": $$, "cwd": "$PWD", "updatedAt": 1}}}
+JSON
+fi
+echo "a wholly unfamiliar interface"
+while IFS= read -r line; do
+  echo "got: $line"
+done

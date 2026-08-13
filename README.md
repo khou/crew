@@ -46,6 +46,34 @@ Change any of it in `~/.config/crew/crew.json`.
 - A worker that **died, or never started**. State comes from the terminal, not
   from the worker reporting in, so a crash still shows up truthfully.
 
+## Permissions, and why a worker stops
+
+A worker runs as autonomously as its agent allows without a human in the loop.
+crew asks each agent for the nearest thing it has to that:
+
+| role level | claude | codex | cursor |
+|---|---|---|---|
+| `plan` | `--permission-mode plan` | `--sandbox read-only --ask-for-approval never` | `--mode plan` |
+| `edit` | `--permission-mode acceptEdits` | `--approve-for-me` | `--auto-review` |
+| `full` | `--permission-mode bypassPermissions` | `--dangerously-bypass-approvals-and-sandbox` | `--force` |
+
+At `edit`, a worker changes files freely. It still stops before doing something
+its agent will not do unattended, usually running a shell command. That stop is
+not a failure. It shows up as `needsInput`, `crew show` prints the question, and
+the director puts it to you. crew never answers a permission prompt for you.
+
+**Setting your agent's own default does not replace this.** Worth knowing
+before you rely on it: with a user-level default of `auto` configured, a worker
+launched with no permission flag still asked before every edit, so that default
+did not reach the worker. `--permission-mode auto` is accepted on the command
+line and also leaves the session in manual mode. Both measured on Claude Code
+2.1.229.
+
+To be interrupted less, allow the specific commands you trust in your agent's
+own settings, rather than moving a role to `full`. `full` exists, but on Claude
+it puts a warning dialog in front of every worker that a human has to answer
+once per session, which defeats the point.
+
 ## crew-reap
 
 Coding agents create a git worktree per session and none of them clean up.

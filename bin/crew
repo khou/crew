@@ -58,6 +58,19 @@ AGENTS = {
         "worktree": "self",
         "args": ["--worktree", "{worktree}", "--model", "{model}",
                  "--effort", "{effort}", "--name", "{name}"],
+        # acceptEdits is the most autonomous mode a worker can be given
+        # without a human in the loop. Measured, on this version:
+        #   no flag             asks before every edit and every command
+        #   --permission-mode auto   accepted, but the session comes up manual
+        #   dontAsk             never asks and blocks edits too, so a worker
+        #                       cannot do its own job
+        #   bypassPermissions   allows everything, behind a warning dialog
+        #                       that a human must answer once per session
+        # So a worker edits freely and stops only at a command it may not run.
+        # That stop is reported as needsInput, and `crew show` is how the
+        # director reads the question and puts it to the human. To have fewer
+        # of those, allow the commands you trust in your own agent settings
+        # rather than loosening this.
         "permission": {
             "plan": ["--permission-mode", "plan"],
             "edit": ["--permission-mode", "acceptEdits"],
@@ -539,12 +552,21 @@ def shell_quote(s):
 
 
 def await_ready(ws, surface, spec, timeout):
-    """Wait until the agent is at its prompt, or say why it will never be."""
+    """Wait until the agent is at its prompt, or say why it will never be.
+
+    Two signals, because neither is enough alone. The ready patterns are
+    wording, and an agent's wording changes with its permission mode and
+    between releases. A registered hook session proves the agent started but
+    not that it has finished drawing, so on its own it would let a message be
+    typed into a session still painting its welcome screen. A settled screen
+    plus a registered session is both.
+    """
     ready = [re.compile(p) for p in spec["ready"]]
     blocked = [re.compile(p) for p in spec["blocked"]]
     quota = [re.compile(p, re.I) for p in (spec.get("exhausted") or QUOTA_PATTERNS)]
     deadline = time.time() + timeout
     screen = ""
+    previous = None
     while time.time() < deadline:
         screen = read_screen(ws, surface, 40)
         for pat in quota:
@@ -562,6 +584,9 @@ def await_ready(ws, surface, spec, timeout):
             return "exited", "the agent exited: " + " | ".join(last)
         if any(p.search(screen) for p in ready):
             return "ready", ""
+        if screen.strip() and screen == previous and surface in hook_sessions():
+            return "ready", ""
+        previous = screen
         time.sleep(2)
     tail = [l for l in screen.splitlines() if l.strip()][-2:]
     return "timeout", f"no prompt after {timeout}s. Last output: {' | '.join(tail)}"
@@ -747,6 +772,27 @@ def cmd_wait(args, cfg):
         time.sleep(args.poll)
 
 
+def cmd_show(args, cfg):
+    """Print what a worker's tab is showing.
+
+    A worker that needs a decision can only be helped if someone can read the
+    question. status says a worker is waiting; this is how the director finds
+    out what it is waiting for, so it can be put to the human in their words.
+    """
+    w = workers().get(args.worker)
+    if not w:
+        die(f"no worker called {args.worker}")
+    state, _ = worker_state(w, hook_sessions())
+    screen = read_screen(w["workspace"], w["surface"], args.lines)
+    if not screen.strip():
+        die(f"{args.worker} has no tab to read. It is {state}.", 1)
+    log(f"{args.worker}  {state}  {w.get('task', '')}")
+    log(f"{w['cwd']}")
+    log("")
+    log("\n".join(l for l in screen.splitlines() if l.strip()))
+    return 0
+
+
 def cmd_say(args, cfg):
     w = workers().get(args.worker)
     if not w:
@@ -801,6 +847,10 @@ def main():
     wt.add_argument("--timeout", type=int, default=120)
     wt.add_argument("--poll", type=float, default=2.0)
 
+    sh = sub.add_parser("show", help="read a worker's screen")
+    sh.add_argument("worker")
+    sh.add_argument("--lines", type=int, default=40)
+
     sy = sub.add_parser("say", help="deliver a message to a worker")
     sy.add_argument("worker")
     sy.add_argument("message")
@@ -820,7 +870,7 @@ def main():
     cfg = config()
     return {
         "doctor": cmd_doctor, "spawn": cmd_spawn, "status": cmd_status,
-        "wait": cmd_wait, "say": cmd_say, "reap": cmd_reap,
+        "wait": cmd_wait, "say": cmd_say, "show": cmd_show, "reap": cmd_reap,
     }[args.cmd](args, cfg)
 
 
