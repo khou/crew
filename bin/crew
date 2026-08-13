@@ -409,12 +409,32 @@ def state_lock():
             fcntl.flock(fh, fcntl.LOCK_UN)
 
 
+def read_state():
+    """Everything in the state file, crew's own notes included.
+
+    A file that is there but will not parse is never read as an empty one.
+    Doing that saves the emptiness back over it on the next write, and every
+    worker still running is gone from crew's view for good.
+    """
+    if not os.path.exists(STATE_PATH):
+        return {}
+    try:
+        with open(STATE_PATH) as fh:
+            data = json.load(fh)
+        if not isinstance(data, dict):
+            raise ValueError("not an object")
+    except (OSError, ValueError) as e:
+        die(f"{STATE_PATH} is unreadable ({e}), so nothing was changed. Move "
+            "it aside to start over. The workers' tabs and branches are "
+            "untouched either way.", 1)
+    return data
+
+
 def workers():
     """The workers. Keys beginning with an underscore are crew's own notes,
     such as which workspace this director's fleet lives in, and are not
     workers."""
-    return {k: v for k, v in load_json(STATE_PATH, {}).items()
-            if not k.startswith("_")}
+    return {k: v for k, v in read_state().items() if not k.startswith("_")}
 
 
 def put_worker(name, data, create=False):
@@ -426,18 +446,24 @@ def put_worker(name, data, create=False):
     to False and such a write is skipped when the worker is already gone.
     Only spawn, which is creating the record for the first time, passes
     create=True.
+
+    Merged rather than replaced, for the same reason: a caller holding an old
+    copy would otherwise erase whatever another command recorded since it
+    read, and a worker whose branch is erased that way cannot be merged.
     """
     with state_lock():
-        all_w = load_json(STATE_PATH, {})
+        all_w = read_state()
         if not create and name not in all_w:
             return
-        all_w[name] = data
+        record = dict(all_w.get(name) or {})
+        record.update(data)
+        all_w[name] = record
         save_json(STATE_PATH, all_w)
 
 
 def drop_worker(name):
     with state_lock():
-        all_w = load_json(STATE_PATH, {})
+        all_w = read_state()
         all_w.pop(name, None)
         save_json(STATE_PATH, all_w)
 
@@ -1149,7 +1175,15 @@ def cmd_stop(args, cfg):
 
     where = worker_dir(args.worker, w, sessions)
     pid = (sessions.get(w["surface"]) or {}).get("pid")
-    cmux("close-surface", "--workspace", w["workspace"], "--surface", w["surface"])
+    rc, out = cmux("close-surface", "--workspace", w["workspace"],
+                   "--surface", w["surface"])
+    if rc != 0 and pid_alive(pid):
+        # Forgetting it here would lose it: nothing else records its surface,
+        # so there would be no way to reach the tab again. A close that fails
+        # on a tab already gone leaves no live pid, and that still stops.
+        die(f"could not close {args.worker}'s tab ({out}) and its agent is "
+            "still running, so it is still a worker. Close the tab yourself, "
+            "then run this again.", 1)
     # Wait for it to actually go. Closing the tab signals the process; it does
     # not wait for it. Returning early means the very next reap sees the
     # worktree as still in use and skips it, and the merge after that finds an
@@ -1292,6 +1326,13 @@ def approve(ws, surface, spec, always=True):
     rules = spec.get("approval") or {}
     if not rules:
         return False, "this agent has no approval prompt defined"
+    status = exited(surface)
+    if status is not None:
+        # The tab keeps showing the question the agent was asking when it
+        # died, and it is a shell now, so the answer would be run as a command.
+        return False, (f"the agent exited with status {status}; its tab is a "
+                       "shell prompt and the answer would have been run as a "
+                       "command")
     screen = read_screen(ws, surface, 40)
     if not screen.strip():
         return False, "nothing on screen"
@@ -1365,6 +1406,13 @@ def cmd_say(args, cfg):
     if state == "running" and not args.now:
         die(f"{args.worker} is mid-turn. Wait for idle, or pass --now to interrupt.", 1)
     if args.now and state == "running":
+        # A session sitting on a login or trust dialog still reports running,
+        # and --now is for interrupting a turn, not one of those. deliver
+        # checks this too, but only after these keys have been sent.
+        if any(re.search(p, read_screen(w["workspace"], w["surface"], 40))
+               for p in (spec.get("blocked") or [])):
+            die(f"{args.worker} is showing something only you can answer. "
+                "Nothing was typed at it.", 1)
         cmux("send-key", "--workspace", w["workspace"], "--surface", w["surface"],
              "escape")
         time.sleep(1)

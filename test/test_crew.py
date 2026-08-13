@@ -920,5 +920,214 @@ class InstallUninstallTest(unittest.TestCase):
                          "sibling checkout's link should have been left alone")
 
 
+class SayNowLeavesABlockedScreenAloneTest(unittest.TestCase):
+    """--now interrupts a running turn. A login or trust dialog is not a turn.
+
+    The session's lifecycle still says running while it sits on one, so
+    --now used to send escape and ctrl+u before deliver ever looked at the
+    screen. A keystroke at a login screen can start a browser sign-in flow
+    and clear the stored credentials.
+    """
+
+    def setUp(self):
+        self.crew = crew_module()
+        self.crew.read_screen = lambda ws, s, lines=40: "Press any key to log in"
+        self.crew.put_worker = lambda name, w: None
+        self.calls = []
+        self.crew.cmux = lambda *a, **k: (self.calls.append(a), (0, ""))[1]
+        w = {"agent": "a", "surface": "s", "workspace": "ws", "role": "r",
+             "task": "t",
+             "fp": self.crew.screen_fingerprint("Press any key to log in"),
+             "fp_at": time.time()}
+        self.crew.workers = lambda: {"w1": w}
+        self.crew.hook_sessions = lambda: {
+            "s": {"state": "running", "pid": os.getpid()}}
+
+    def test_no_keystrokes_reach_a_worker_showing_a_login_screen(self):
+        cfg = dict(self.crew.DEFAULTS)
+        cfg["agents"] = {"a": {"blocked": [r"Press any key to log in"]}}
+        args = types.SimpleNamespace(worker="w1", message="hi", now=True)
+        out = io.StringIO()
+        with self.assertRaises(SystemExit) as ctx:
+            with contextlib.redirect_stdout(out):
+                self.crew.cmd_say(args, cfg)
+        self.assertEqual(ctx.exception.code, 1)
+        typed = [c for c in self.calls if c[0] in ("send", "send-key")]
+        self.assertEqual(typed, [], f"blocked screen was typed at: {typed}")
+
+    def test_now_still_interrupts_an_ordinary_running_turn(self):
+        self.crew.read_screen = lambda ws, s, lines=40: "working on it"
+        self.crew.deliver = lambda ws, s, text, spec: (True, "")
+        cfg = dict(self.crew.DEFAULTS)
+        cfg["agents"] = {"a": {"blocked": [r"Press any key to log in"]}}
+        args = types.SimpleNamespace(worker="w1", message="hi", now=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.crew.cmd_say(args, cfg), 0)
+        keys = [c[-1] for c in self.calls if c[0] == "send-key"]
+        self.assertIn("escape", keys)
+
+
+class ApproveDoesNotTypeAtAnExitedWorkerTest(unittest.TestCase):
+    """A dead worker's tab is a shell, and its last frame still shows the
+    question it was asking when it died. Answering that types "2" at a shell
+    prompt, which runs it as a command."""
+
+    def setUp(self):
+        self.crew = crew_module()
+        self.tmp = tempfile.mkdtemp(prefix="crew-approve-exit-")
+        self.crew.EXIT_DIR = self.tmp
+        with open(os.path.join(self.tmp, "s.exit"), "w") as fh:
+            fh.write("1")
+        self.crew.read_screen = lambda ws, s, lines=40: (
+            "Do you want to proceed?\n 2. Yes, and do not ask again\n"
+            "[crew] agent exited with status 1")
+        self.calls = []
+        self.crew.cmux = lambda *a, **k: (self.calls.append(a), (0, ""))[1]
+        self.crew.workers = lambda: {
+            "w1": {"agent": "a", "surface": "s", "workspace": "ws"}}
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_approve_refuses_and_sends_nothing(self):
+        cfg = dict(self.crew.DEFAULTS)
+        cfg["agents"] = {"a": {"approval": {"prompt": [r"Do you want to proceed"],
+                                            "always": "2", "once": "1"}}}
+        args = types.SimpleNamespace(worker="w1", once=False)
+        out = io.StringIO()
+        with self.assertRaises(SystemExit) as ctx:
+            with contextlib.redirect_stdout(out):
+                self.crew.cmd_approve(args, cfg)
+        self.assertEqual(ctx.exception.code, 1)
+        typed = [c for c in self.calls if c[0] in ("send", "send-key")]
+        self.assertEqual(typed, [], f"a dead worker's shell was typed at: {typed}")
+
+
+class StopKeepsAWorkerWhoseTabWouldNotCloseTest(unittest.TestCase):
+    """Forgetting a worker whose agent is still running loses it for good:
+    nothing else names its surface, so it can never be stopped again."""
+
+    def setUp(self):
+        self.crew = crew_module()
+        self.tmp = tempfile.mkdtemp(prefix="crew-stop-close-")
+        self.crew.STATE_PATH = os.path.join(self.tmp, "workers.json")
+        self.crew.EXIT_DIR = os.path.join(self.tmp, "exited")
+        self.crew.read_screen = lambda ws, s, lines=40: ""
+        self.crew.put_worker("w1", {"agent": "a", "surface": "s",
+                                    "workspace": "ws", "role": "r", "task": "t",
+                                    "repo": "", "cwd": "/nonexistent"},
+                             create=True)
+        self.calls = []
+
+        def fake_cmux(*args, timeout=60):
+            self.calls.append(args)
+            return (1, "no surface with that id") if args[0] == "close-surface" \
+                else (0, "")
+
+        self.crew.cmux = fake_cmux
+        self.cfg = dict(self.crew.DEFAULTS)
+        self.cfg["agents"] = {"a": {}}
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def stop(self):
+        self.crew.hook_sessions = lambda: self.sessions
+        args = types.SimpleNamespace(worker="w1", force=False)
+        with contextlib.redirect_stdout(io.StringIO()):
+            return self.crew.cmd_stop(args, self.cfg)
+
+    def test_a_failed_close_with_the_agent_still_alive_keeps_the_record(self):
+        self.sessions = {"s": {"state": "idle", "pid": os.getpid()}}
+        with self.assertRaises(SystemExit):
+            self.stop()
+        self.assertIn("w1", self.crew.workers(),
+                      "the worker was forgotten while its agent kept running")
+
+    def test_a_worker_whose_tab_is_already_gone_is_still_forgotten(self):
+        self.sessions = {}
+        self.assertEqual(self.stop(), 0)
+        self.assertNotIn("w1", self.crew.workers())
+
+
+class UnreadableStateFileTest(unittest.TestCase):
+    """A half-written or hand-edited workers.json must not read as empty.
+
+    Treating it as empty makes the next write save that emptiness over it,
+    and every worker still running is gone from crew's view for good.
+    """
+
+    def setUp(self):
+        self.crew = crew_module()
+        self.tmp = tempfile.mkdtemp(prefix="crew-badstate-")
+        self.crew.STATE_PATH = os.path.join(self.tmp, "workers.json")
+        self.truncated = '{"w1": {"task": "t", "surf'
+        with open(self.crew.STATE_PATH, "w") as fh:
+            fh.write(self.truncated)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def contents(self):
+        with open(self.crew.STATE_PATH) as fh:
+            return fh.read()
+
+    def test_dropping_a_worker_does_not_wipe_the_file(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                self.crew.drop_worker("w2")
+        self.assertEqual(self.contents(), self.truncated)
+
+    def test_creating_a_worker_does_not_wipe_the_file(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                self.crew.put_worker("w2", {"task": "t"}, create=True)
+        self.assertEqual(self.contents(), self.truncated)
+
+    def test_the_failure_names_the_file(self):
+        out = io.StringIO()
+        with self.assertRaises(SystemExit):
+            with contextlib.redirect_stdout(out):
+                self.crew.workers()
+        self.assertIn(self.crew.STATE_PATH, out.getvalue())
+
+    def test_a_missing_state_file_is_still_simply_empty(self):
+        os.remove(self.crew.STATE_PATH)
+        self.assertEqual(self.crew.workers(), {})
+
+
+class StaleWriteKeepsFieldsWrittenSinceTest(unittest.TestCase):
+    """Every command holds a worker record it read some time ago. Writing
+    that whole copy back erases anything another command recorded in the
+    meantime, and a lost branch is a worker whose work cannot be merged."""
+
+    def setUp(self):
+        self.crew = crew_module()
+        self.tmp = tempfile.mkdtemp(prefix="crew-stale-write-")
+        self.crew.STATE_PATH = os.path.join(self.tmp, "workers.json")
+        self.crew.put_worker("w1", {"role": "r", "task": "t", "surface": "s"},
+                             create=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_a_refresh_writing_its_old_copy_does_not_erase_a_branch(self):
+        # A status refresh reads the worker, then spawn records the branch it
+        # resolved, then the refresh writes its fingerprint from the copy it
+        # read before that.
+        stale = self.crew.workers()["w1"]
+
+        recorded = dict(self.crew.workers()["w1"])
+        recorded["branch"] = "crew/w1"
+        self.crew.put_worker("w1", recorded)
+
+        stale["fp"] = "abc"
+        self.crew.put_worker("w1", stale)
+
+        self.assertEqual(self.crew.workers()["w1"].get("branch"), "crew/w1",
+                         "the recorded branch was erased by a stale write")
+        self.assertEqual(self.crew.workers()["w1"].get("fp"), "abc")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
