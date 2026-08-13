@@ -16,6 +16,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+import unittest.mock as mock
 
 REAP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bin", "crew-reap")
 
@@ -38,6 +39,19 @@ def git(repo, *args, check=True):
     if check and p.returncode != 0:
         raise AssertionError(f"git {' '.join(args)} failed: {p.stdout}{p.stderr}")
     return p.stdout.strip()
+
+
+class PidAliveTest(unittest.TestCase):
+    """A pid we cannot signal is not the same as a pid that is gone."""
+
+    def setUp(self):
+        self.reap = reap_module()
+
+    def test_permission_denied_is_alive_but_no_such_process_is_dead(self):
+        with mock.patch.object(os, "kill", side_effect=PermissionError):
+            self.assertTrue(self.reap.pid_alive(123))
+        with mock.patch.object(os, "kill", side_effect=ProcessLookupError):
+            self.assertFalse(self.reap.pid_alive(123))
 
 
 class ReapTest(unittest.TestCase):
