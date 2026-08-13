@@ -168,6 +168,78 @@ class LiveTest(unittest.TestCase):
         p = self.crew("spawn", "q", "hello", "--no-task")
         self.assertIn("ready", p.stdout, p.stdout + p.stderr)
 
+    def commit_in(self, path, filename, text):
+        with open(os.path.join(path, filename), "w") as fh:
+            fh.write(text)
+        subprocess.run(["git", "add", "-A"], cwd=path, capture_output=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "-qm", "worker output"], cwd=path,
+                       capture_output=True)
+
+    def test_stop_closes_the_tab_and_forgets_the_worker(self):
+        self.crew("spawn", "f", "a task", "--name", "s1", "--no-task")
+        w = self.workers()["s1"]
+        p = self.crew("stop", "s1")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertNotIn("s1", self.workers())
+        screen = cmux("read-screen", "--workspace", w["workspace"],
+                      "--surface", w["surface"], "--lines", "5")
+        self.assertNotEqual(screen.returncode, 0, "the tab is still open")
+
+    def test_stop_refuses_a_worker_mid_turn(self):
+        self.crew("spawn", "f", "a task", "--name", "s2", "--no-task")
+        self.fake_session("s2", "running")
+        p = self.crew("stop", "s2")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("s2", self.workers(), "the worker was forgotten anyway")
+
+    def test_stop_leaves_the_work_on_its_branch(self):
+        self.crew("spawn", "f", "a task", "--name", "s3", "--no-task")
+        wt = self.workers()["s3"]["cwd"]
+        self.commit_in(wt, "kept.txt", "still here")
+        self.crew("stop", "s3")
+        p = subprocess.run(["git", "-C", self.repo, "show", "crew/s3:kept.txt"],
+                           capture_output=True, text=True)
+        self.assertEqual(p.stdout.strip(), "still here")
+
+    def test_merge_brings_a_workers_branch_into_the_repo(self):
+        self.crew("spawn", "f", "a task", "--name", "m1", "--no-task")
+        wt = self.workers()["m1"]["cwd"]
+        self.commit_in(wt, "delivered.txt", "from the worker")
+        p = self.crew("merge", "m1")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        with open(os.path.join(self.repo, "delivered.txt")) as fh:
+            self.assertEqual(fh.read(), "from the worker")
+
+    def test_merge_refuses_while_the_worker_still_has_uncommitted_work(self):
+        self.crew("spawn", "f", "a task", "--name", "m2", "--no-task")
+        wt = self.workers()["m2"]["cwd"]
+        with open(os.path.join(wt, "half-done.txt"), "w") as fh:
+            fh.write("not committed")
+        p = self.crew("merge", "m2")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("uncommitted", p.stdout)
+        self.assertFalse(os.path.exists(os.path.join(self.repo, "half-done.txt")))
+
+    def test_merge_refuses_into_a_dirty_checkout(self):
+        # Merging into a dirty tree mixes the human's work with the worker's,
+        # and makes backing the merge out much harder than refusing.
+        self.crew("spawn", "f", "a task", "--name", "m3", "--no-task")
+        self.commit_in(self.workers()["m3"]["cwd"], "theirs.txt", "worker")
+        with open(os.path.join(self.repo, "README.md"), "w") as fh:
+            fh.write("edited by the human, not committed")
+        p = self.crew("merge", "m3")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("uncommitted changes", p.stdout)
+
+    def test_merge_is_not_blocked_by_crews_own_worktree_directory(self):
+        # .crew/worktrees lives inside the repo and is untracked, so a check
+        # that counted untracked files would refuse every merge forever.
+        self.crew("spawn", "f", "a task", "--name", "m4", "--no-task")
+        self.commit_in(self.workers()["m4"]["cwd"], "fine.txt", "ok")
+        p = self.crew("merge", "m4")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+
     def test_show_prints_what_a_worker_is_asking(self):
         # status says a worker is waiting. This is how the director finds out
         # what it is waiting for, which is the whole of "surface it to the

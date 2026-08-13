@@ -15,6 +15,9 @@ crew spawn worker "add the retry path" # open a worker tab, wait until ready
 crew status                            # who is working, idle, or stuck
 crew wait                              # block until one needs you
 crew say worker-add-the "also cover timeouts"
+crew show worker-add-the               # read what it is asking
+crew merge worker-add-the              # bring its branch into the repo
+crew stop worker-add-the               # close its tab, keeping its work
 crew reap --apply                      # remove finished worktrees
 ```
 

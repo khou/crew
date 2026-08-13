@@ -10,7 +10,10 @@ than an API key.
   crew spawn <role> <task> open a worker tab and wait until it is ready
   crew status              what every worker is doing
   crew wait                block until a worker goes idle or needs you
+  crew show <worker>       read what a worker is showing, and asking
   crew say <worker> <text> deliver a message, safely
+  crew merge <worker>      merge a worker's branch into this repo
+  crew stop <worker>       close a worker's tab, keeping its work
   crew reap                remove finished worktrees (see crew-reap)
 
 Nothing here runs in the background. Each command does one thing and exits.
@@ -743,6 +746,15 @@ def cmd_wait(args, cfg):
     anything has changed since the last call, so a worker that finished while
     the director was busy is reported immediately rather than waited on.
     """
+    try:
+        return wait_loop(args, cfg)
+    except KeyboardInterrupt:
+        log("stopped waiting. Nothing was missed: anything that changed while "
+            "you were away is still unreported, so crew wait picks it up.")
+        return 130
+
+
+def wait_loop(args, cfg):
     interesting = {"idle", "needsInput", "gone", "stalled", "quota"}
     deadline = time.time() + args.timeout
     first = True
@@ -757,10 +769,14 @@ def cmd_wait(args, cfg):
             if state != w.get("seen") and state in interesting:
                 changed.append((name, state, w))
         if changed:
+            # Printed before it is marked seen. An interrupt between the two
+            # can then only repeat a change, never swallow one, and repeating
+            # is harmless where losing is not.
+            for name, state, w in changed:
+                log(f"{name:28} {state:10} {w['role']:10} {w['task'][:44]}")
             for name, state, w in changed:
                 w["seen"] = state
                 put_worker(name, w)
-                log(f"{name:28} {state:10} {w['role']:10} {w['task'][:44]}")
             return 0
         if not first and time.time() >= deadline:
             log(f"nothing changed in {args.timeout}s")
@@ -770,6 +786,111 @@ def cmd_wait(args, cfg):
             log(f"nothing changed in {args.timeout}s")
             return 0
         time.sleep(args.poll)
+
+
+def worker_dir(w, sessions):
+    """Where a worker is actually working.
+
+    An agent that makes its own worktree moves itself there, so what crew
+    asked for is not necessarily where the work is. The session reports the
+    truth.
+    """
+    return sessions.get(w["surface"], {}).get("cwd") or w.get("cwd", "")
+
+
+def worker_branch(path):
+    rc, out = run(["git", "-C", path, "rev-parse", "--abbrev-ref", "HEAD"])
+    return out if rc == 0 and out and out != "HEAD" else None
+
+
+def cmd_stop(args, cfg):
+    """Close a worker's tab and forget it. Its work stays on its branch.
+
+    Stopping does not remove the worktree: `crew reap` does that, and it
+    commits anything uncommitted first. Doing it here would mean deciding what
+    to keep at the moment you are least able to look.
+    """
+    w = workers().get(args.worker)
+    if not w:
+        die(f"no worker called {args.worker}")
+    sessions = hook_sessions()
+    state, _ = worker_state(w, sessions)
+    if state == "running" and not args.force:
+        die(f"{args.worker} is mid-turn. Wait for it, or pass --force to stop "
+            "it anyway. Anything it has written is kept either way.", 1)
+
+    where = worker_dir(w, sessions)
+    cmux("close-surface", "--workspace", w["workspace"], "--surface", w["surface"])
+    marker = exit_marker(w["surface"])
+    if os.path.exists(marker):
+        os.remove(marker)
+    drop_worker(args.worker)
+
+    branch = worker_branch(where) if where and os.path.isdir(where) else None
+    log(f"stopped {args.worker}, it was {state}")
+    if branch:
+        log(f"  its work is on {branch}")
+    log(f"  its worktree is still at {where}. crew reap removes it, "
+        "committing anything uncommitted first.")
+    return 0
+
+
+def cmd_merge(args, cfg):
+    """Merge a worker's branch into the repo you are in.
+
+    Refuses rather than guesses. A merge that goes wrong mid-way is much
+    harder to explain than one that never started.
+    """
+    w = workers().get(args.worker)
+    if not w:
+        die(f"no worker called {args.worker}")
+    sessions = hook_sessions()
+    state, _ = worker_state(w, sessions)
+    if state == "running" and not args.force:
+        die(f"{args.worker} is still working. Merging now takes a half-written "
+            "state. Wait for idle, or pass --force.", 1)
+
+    where = worker_dir(w, sessions)
+    if not where or not os.path.isdir(where):
+        die(f"{args.worker} has no worktree left to merge from", 1)
+    branch = worker_branch(where)
+    if not branch:
+        die(f"{args.worker} is on a detached HEAD, so there is no branch to "
+            "merge. crew reap saves that work to a branch first.", 1)
+
+    rc, dirty = run(["git", "-C", where, "--no-optional-locks", "status",
+                     "--porcelain"])
+    if dirty:
+        die(f"{args.worker} has {len(dirty.splitlines())} uncommitted file(s). "
+            "Run crew reap to commit them to its branch, then merge.", 1)
+
+    repo = w.get("repo") or os.getcwd()
+    # Tracked changes only. Untracked files do not conflict with a merge, git
+    # refuses on its own if one would be overwritten, and crew's own worktree
+    # directory lives here untracked, which would otherwise make every repo
+    # look permanently dirty.
+    rc, dirty = run(["git", "-C", repo, "--no-optional-locks", "status",
+                     "--porcelain", "--untracked-files=no"])
+    if dirty:
+        die(f"{repo} has uncommitted changes to {len(dirty.splitlines())} "
+            "tracked file(s). Merging into a dirty checkout mixes your work "
+            "with the worker's. Commit or stash first.", 1)
+
+    into = worker_branch(repo) or "HEAD"
+    rc, out = run(["git", "-C", repo, "merge", "--no-ff", branch, "-m",
+                   f"Merge {branch}: {w.get('task', '')[:60]}"])
+    if rc != 0:
+        log(f"merge of {branch} into {into} did not complete:")
+        log(out)
+        log("")
+        log("The merge is left in progress. Resolve it, or run "
+            f"git -C {repo} merge --abort")
+        return 1
+    log(f"merged {branch} into {into}")
+    log(f"  {out.splitlines()[-1] if out else ''}")
+    log(f"  {args.worker} is still open. crew stop closes it, crew reap "
+        "removes its worktree.")
+    return 0
 
 
 def cmd_show(args, cfg):
@@ -847,6 +968,16 @@ def main():
     wt.add_argument("--timeout", type=int, default=120)
     wt.add_argument("--poll", type=float, default=2.0)
 
+    st = sub.add_parser("stop", help="close a worker's tab")
+    st.add_argument("worker")
+    st.add_argument("--force", action="store_true",
+                    help="stop it even if it is mid-turn")
+
+    mg = sub.add_parser("merge", help="merge a worker's branch into this repo")
+    mg.add_argument("worker")
+    mg.add_argument("--force", action="store_true",
+                    help="merge even if the worker is still working")
+
     sh = sub.add_parser("show", help="read a worker's screen")
     sh.add_argument("worker")
     sh.add_argument("--lines", type=int, default=40)
@@ -870,7 +1001,8 @@ def main():
     cfg = config()
     return {
         "doctor": cmd_doctor, "spawn": cmd_spawn, "status": cmd_status,
-        "wait": cmd_wait, "say": cmd_say, "show": cmd_show, "reap": cmd_reap,
+        "wait": cmd_wait, "say": cmd_say, "show": cmd_show, "stop": cmd_stop,
+        "merge": cmd_merge, "reap": cmd_reap,
     }[args.cmd](args, cfg)
 
 

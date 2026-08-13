@@ -15,6 +15,7 @@ import json
 import os
 import shutil
 import tempfile
+import types
 import unittest
 
 CREW = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bin", "crew")
@@ -84,6 +85,34 @@ class DeathTest(unittest.TestCase):
         self.crew.cmux = lambda *a, **k: (captured.update(cmd=a), (0, ""))[1]
         self.crew.launch("ws", surface, "/tmp", ["/bin/true"], {})
         return " ".join(captured["cmd"])
+
+
+class WaitTest(unittest.TestCase):
+    def test_a_change_is_printed_before_it_is_marked_seen(self):
+        # Interrupting between the two can then only repeat a change, never
+        # swallow one. A change marked seen but never shown is gone for good,
+        # because wait only ever reports what is new.
+        crew = crew_module()
+        marked = []
+        worker = {"role": "r", "task": "t", "surface": "s"}
+        crew.workers = lambda: {"w": worker}
+        crew.hook_sessions = lambda: {}
+        crew.refresh = lambda all_w, sessions, cfg: {"w": ("idle", worker)}
+        crew.put_worker = lambda name, w: marked.append(name)
+
+        printed = []
+
+        def interrupted_log(msg=""):
+            printed.append(msg)
+            if len(printed) == 1:
+                raise KeyboardInterrupt
+
+        crew.log = interrupted_log
+        rc = crew.cmd_wait(types.SimpleNamespace(timeout=1, poll=0.01), {})
+
+        self.assertEqual(rc, 130)
+        self.assertEqual(marked, [],
+                         "the change was marked seen despite never being shown")
 
 
 class LaunchTest(unittest.TestCase):

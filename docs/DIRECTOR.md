@@ -16,6 +16,8 @@ crew status                       # who is working, idle, or stuck
 crew wait                         # block until one of them needs you
 crew show <worker>                # read what it is showing, and asking
 crew say <worker> "<message>"     # send a follow-up
+crew merge <worker>               # bring its branch into the repo
+crew stop <worker>                # close its tab, keeping its work
 crew reap --apply                 # remove finished worktrees
 ```
 
@@ -66,6 +68,17 @@ may be halfway through an edit.
 **Workers cannot see each other.** Each one has its own worktree and its own
 context. If something one worker learns changes what another should do, that is
 your job to pass along. Nothing else will.
+
+**Finishing a piece is three steps, in order.** `crew merge <worker>` brings
+its branch into the repo you are in. `crew stop <worker>` closes its tab.
+`crew reap --apply` removes the worktree. Each refuses rather than guesses:
+merge will not run while the worker is working, into a dirty checkout, or with
+uncommitted work in the worktree, and it tells you which. Reap takes care of
+the uncommitted case by committing to the worker's branch first.
+
+**Interrupting `crew wait` costs nothing.** It prints a change before marking
+it seen, so stopping it mid-wait can at worst repeat something, never lose it.
+Run it again and it picks up anything that happened meanwhile.
 
 **Reap when a piece is done.** Every worker leaves a worktree behind. `crew
 reap` commits anything uncommitted to its branch first, so reaping never
