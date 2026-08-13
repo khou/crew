@@ -232,6 +232,25 @@ class ReapTest(unittest.TestCase):
                              "--porcelain").count("README.md"), 1,
                          "the primary's uncommitted change was taken away")
 
+    def test_missing_repo_path_does_not_abort_other_repos(self):
+        # A typo'd or removed --repo path used to crash the whole run with a
+        # Traceback (primary_checkout's subprocess.run(cwd=...) raises
+        # FileNotFoundError for a nonexistent cwd), so a valid repo passed
+        # alongside it never got reaped.
+        wt = self.worktree("idle")
+        missing = os.path.join(self.tmp, "does-not-exist")
+
+        env = dict(os.environ, CREW_REAP_CONFIG=self.cfg_path)
+        p = subprocess.run(
+            [REAP, "--repo", self.repo, "--repo", missing, "--apply"],
+            capture_output=True, text=True, env=env, cwd=self.tmp)
+        out = p.stdout + p.stderr
+
+        self.assertNotIn("Traceback", out)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn(missing, out)
+        self.assertFalse(os.path.exists(wt), "the valid repo's worktree was not reaped")
+
     def test_run_from_inside_a_linked_worktree_finds_the_repo(self):
         # Run from inside a linked worktree with no --repo (roots guessed):
         # resolve_roots used to take the worktree's own parent directory. For
