@@ -596,6 +596,7 @@ def cmd_spawn(args, cfg):
         die(f"agent {role['agent']} has no '{level}' permission mode. "
             f"Known: {', '.join(sorted(modes)) or 'none'}")
     argv += modes[level]
+    argv += spec.get("quiet_args") or []
     launch(ws, surface, cwd, argv, spec)
 
     put_worker(name, {"role": args.role, "agent": role["agent"], "task": args.task,

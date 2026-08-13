@@ -205,6 +205,20 @@ class LiveTest(unittest.TestCase):
         self.assertIn("task delivered", p.stdout)
         self.assertIn("GOT: carrots", self.screen("w2"))
 
+    def test_a_worker_is_launched_with_its_agents_notifications_turned_off(self):
+        # The director is the only thing that should interrupt the person. The
+        # agent declared the flags that do this and nothing ever passed them,
+        # so every worker notified and cmux pulled the person's selection over
+        # to the worker's workspace, which is the one thing crew must not do.
+        self.write_config({
+            "agents": {"quiet": fake("fake-agent",
+                                     quiet_args=["--notifications-off"])},
+            "roles": {"q": {"agent": "quiet", "permission": "edit"}},
+            "ready_timeout": 25,
+        })
+        self.crew("spawn", "q", "a task", "--name", "qn1", "--no-task")
+        self.assertIn("--notifications-off", self.workers()["qn1"]["argv"])
+
     def test_a_session_asking_for_a_login_is_reported_and_never_typed_at(self):
         p = self.crew("spawn", "flogin", "anything", "--name", "w3")
         self.assertEqual(p.returncode, 1)
