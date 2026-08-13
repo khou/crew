@@ -132,8 +132,8 @@ destroys work, but it will not touch a worktree that is still in use.
 
 **Running is not working.** A wedged agent keeps reporting that it is busy.
 crew calls it `stalled` once its screen has gone unchanged for long enough,
-ignoring spinners and clocks. Treat a stall as a task that was too big or too
-vague, not as a reason to wait longer.
+ignoring spinners, clocks and token counters. Treat a stall as a task that was
+too big or too vague, not as a reason to wait longer.
 
 **One exhausted agent exhausts them all.** Workers share one subscription, so
 when a plan limit is hit, every worker on that agent hits it. crew refuses to

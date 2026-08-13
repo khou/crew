@@ -191,17 +191,24 @@ DEFAULTS = {
     "auto_approve": True,
 }
 
-# Signs a session has run out of plan allowance. Deliberately broad, because
-# every agent words this differently and the cost of missing it is a director
-# that keeps spawning workers onto an exhausted account.
+# What a session prints when it has actually run out, as whole sentences
+# rather than the words they contain. A bare word cannot tell the difference:
+# crew names each worktree and branch after its worker and the agent draws
+# both in its own chrome, so a worker called fix-quota-detect read as
+# exhausted on a healthy welcome screen, and crew then refused to spawn
+# anything else onto that agent. Every pattern keeps an alternation in it, so
+# this list does not match itself when a worker has this file on screen.
 #
 # These are heuristics. They have not been checked against a real exhaustion
 # event for every agent, so treat a match as a strong hint and a non-match as
 # no information. Extend per agent with an "exhausted" list in config.
 QUOTA_PATTERNS = [
-    r"usage limit", r"rate limit", r"quota", r"limit reached",
-    r"out of (credits|tokens)", r"upgrade your plan",
-    r"resets? (at|in) ", r"too many requests",
+    r"(?:usage|rate|quota) limit (?:reached|exceeded)",
+    r"you(?:'ve| have|'re| are)? ?(?:reached|hit|exceeded|used up) "
+    r"(?:your|the)[\w ]{0,24}(?:limit|quota|credits)",
+    r"(?:you(?:'re| are)|account is) out of (?:credits|tokens)",
+    r"upgrade (?:your plan|your subscription|to a paid plan) to continue",
+    r"limit will reset (?:at|in) ",
 ]
 
 # A screen has to hold still across this many consecutive polls, and the
@@ -598,12 +605,13 @@ def cmd_spawn(args, cfg):
     argv += modes[level]
     launch(ws, surface, cwd, argv, spec)
 
-    put_worker(name, {"role": args.role, "agent": role["agent"], "task": args.task,
-                      "surface": surface, "workspace": ws, "repo": repo,
-                      "cwd": cwd, "argv": argv, "started": int(time.time())},
-              create=True)
+    rec = {"role": args.role, "agent": role["agent"], "task": args.task,
+           "surface": surface, "workspace": ws, "repo": repo,
+           "cwd": cwd, "argv": argv, "started": int(time.time())}
+    put_worker(name, rec, create=True)
 
-    state, detail = await_ready(ws, surface, spec, cfg["ready_timeout"])
+    state, detail = await_ready(ws, surface, spec, cfg["ready_timeout"],
+                                crew_text(name, rec) + [title])
     if state != "ready":
         log(f"worker {name} did not start: {detail}")
         log(f"  its tab is still open so you can see what happened: {title}")
@@ -703,7 +711,26 @@ def shell_quote(s):
     return "'" + str(s).replace("'", "'\\''") + "'"
 
 
-def await_ready(ws, surface, spec, timeout):
+def crew_text(name, w):
+    """The strings crew itself put on a worker's screen.
+
+    crew names the worktree and the branch after the worker, titles its tab
+    after the role and the task, and types the task into its composer, and
+    agents draw all of that back in their own chrome.
+    """
+    task = w.get("task") or ""
+    return [name, w.get("cwd"), w.get("branch"), w.get("role"), task,
+            " ".join(task.split())]
+
+
+def strip_crew_text(screen, ours):
+    """The screen with crew's own words removed, leaving the agent's."""
+    for bit in sorted({b for b in ours if b and len(b) > 3}, key=len, reverse=True):
+        screen = re.sub(re.escape(bit), " ", screen, flags=re.I)
+    return screen
+
+
+def await_ready(ws, surface, spec, timeout, ours=()):
     """Wait until the agent is at its prompt, or say why it will never be.
 
     Two signals, because neither is enough alone. The ready patterns are
@@ -723,8 +750,9 @@ def await_ready(ws, surface, spec, timeout):
     stable = 0
     while time.time() < deadline:
         screen = read_screen(ws, surface, 40)
+        theirs = strip_crew_text(screen, ours)
         for pat in quota:
-            if pat.search(screen):
+            if pat.search(theirs):
                 return "quota", (
                     "it started but is reporting a plan limit "
                     f"(matched {pat.pattern!r}). Nothing was typed at it.")
@@ -836,13 +864,14 @@ def cmd_status(args, cfg):
 def screen_fingerprint(text):
     """What the screen looks like, ignoring what changes on its own.
 
-    Clocks, spinners and elapsed-time counters tick without any work
-    happening, so they are stripped before comparing. Otherwise nothing would
-    ever look stalled.
+    Clocks, spinners, elapsed-time counters and token counters all tick
+    without any work happening, so they are stripped before comparing.
+    Otherwise nothing would ever look stalled.
     """
     text = re.sub(r"\d+(\.\d+)?\s*(s|ms|m|h)\b", "", text)
     text = re.sub(r"\d{1,2}:\d{2}(:\d{2})?", "", text)
-    text = re.sub(r"[·✻✳✽*|/\\-]+", "", text)
+    text = re.sub(r"\d[\d,.]*\s*[km]?\s*tokens?", "", text, flags=re.I)
+    text = re.sub(r"[⠀-⣿·✻✳✽✢*|/\\-]+", "", text)
     # A stable digest, not hash(): Python randomises string hashing per
     # process, and every crew command is a new process, so hash() would make
     # an unchanged screen look different every single time.
@@ -915,8 +944,9 @@ def refresh(all_w, sessions, cfg):
         # them on screen, and being called exhausted also stops it being
         # approved, so it wedges. Reproduced: a fixer working on quota
         # detection asked to run a test named QuotaOnlyInTheTailTest.
-        if (last_lines and not showing_prompt and any(
-                re.search(p, "\n".join(last_lines), re.I) for p in patterns)):
+        theirs = strip_crew_text("\n".join(last_lines), crew_text(name, w))
+        if last_lines and not showing_prompt and any(
+                re.search(p, theirs, re.I) for p in patterns):
             state = "quota"
 
         # A session can report needsInput and then finish the turn without

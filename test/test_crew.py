@@ -519,6 +519,204 @@ class QuotaPatternTest(unittest.TestCase):
             self.assertEqual(hits, [], f"false positive on a healthy screen: {line}")
 
 
+def pattern_source_lines():
+    """The QUOTA_PATTERNS list exactly as it is written in bin/crew."""
+    with open(CREW) as fh:
+        src = fh.read()
+    block = src.split("QUOTA_PATTERNS = [", 1)[1].split("]", 1)[0]
+    return [l for l in block.splitlines() if l.strip().startswith('r"')]
+
+
+# Screens taken from what these agents draw. The exhausted ones are the whole
+# sentence an agent prints where it stopped; the healthy ones all contain a
+# word from that sentence without meaning any of it.
+CLAUDE_EXHAUSTED = """\
+⏺ Read(bin/crew)
+  ⎿  Read 1496 lines
+
+⏺ I'll add the pattern list next.
+
+Claude usage limit reached. Your limit will reset at 4pm (Europe/London)."""
+
+CODEX_EXHAUSTED = """\
+• Updated test/test_crew.py (+12 -3)
+
+▌ You've hit your usage limit. Try again after 3:00 PM, or upgrade your plan."""
+
+CURSOR_EXHAUSTED = """\
+● Ran python3 test/test_crew.py
+  40 passed
+
+You are out of credits. Add credits or wait for the monthly reset."""
+
+# The live one. crew named the worktree and the branch after the worker, and
+# claude draws both in its own chrome, so a bare-word scan called a healthy
+# welcome screen exhausted the instant it came up.
+QUOTA_NAMED_WELCOME = """\
+╭──────────────────────────────────────────────────────────────╮
+│ ✻ Welcome to Claude Code                                     │
+│                                                              │
+│   /help for help, /status for your current setup             │
+│                                                              │
+│   cwd: /Users/k/github/crew/.crew/worktrees/fix-quota-detect │
+╰──────────────────────────────────────────────────────────────╯
+
+> Try "how do I log an error?"
+
+  ⏵⏵ accept edits on (shift+tab to cycle) · crew/fix-quota-detect"""
+
+
+class ExhaustionCorpusTest(unittest.TestCase):
+    """Real screens, both ways. Only a session that has actually run out."""
+
+    def setUp(self):
+        self.crew = crew_module()
+        self.crew.put_worker = lambda name, w: None
+
+    def state(self, screen, name="w", agent=None, session="running", **extra):
+        self.crew.read_screen = lambda ws, surface, lines=40: screen
+        cfg = dict(self.crew.DEFAULTS)
+        cfg["agents"] = {"a": {} if agent is None else agent}
+        w = {"agent": "a", "surface": "s", "workspace": "ws", "role": "worker",
+             "task": "t", "fp": "x", "fp_at": time.time()}
+        w.update(extra)
+        sessions = {"s": {"state": session, "pid": os.getpid()}}
+        return self.crew.refresh({name: w}, sessions, cfg)[name][0]
+
+    def test_a_claude_session_that_ran_out_is_exhausted(self):
+        self.assertEqual(self.state(CLAUDE_EXHAUSTED), "quota")
+
+    def test_a_codex_session_that_ran_out_is_exhausted(self):
+        self.assertEqual(self.state(CODEX_EXHAUSTED), "quota")
+
+    def test_a_cursor_session_that_ran_out_is_exhausted(self):
+        self.assertEqual(self.state(CURSOR_EXHAUSTED), "quota")
+
+    def test_an_allowance_status_line_is_not_exhaustion(self):
+        # "api 0% left" is a healthy status line, not a session that stopped.
+        screen = "⏺ Done. The suite is green.\n\n" \
+                 "ga | Composer 2.5 | main | api 0% left (Aug 17) | toko 113 memories"
+        self.assertEqual(self.state(screen), "running")
+
+    def test_a_permission_prompt_quoting_a_limit_word_is_not_exhaustion(self):
+        screen = ("Do you want to proceed?\n"
+                  " 1. Yes\n"
+                  " 2. Yes, and do not ask again for: python3 test/test_crew.py "
+                  "QuotaOnlyInTheTailTest")
+        state = self.state(screen, session="needsInput",
+                           agent={"approval": {"prompt": [r"Do you want to proceed"]}})
+        self.assertEqual(state, "needsInput")
+
+    def test_a_worker_named_after_a_limit_is_not_exhausted(self):
+        # The live failure: the worktree, the branch and the tab all carry the
+        # worker's name, so the name must never be what crew reads.
+        state = self.state(QUOTA_NAMED_WELCOME, name="fix-quota-detect",
+                           branch="crew/fix-quota-detect",
+                           cwd="/Users/k/github/crew/.crew/worktrees/fix-quota-detect",
+                           task="fix quota detection")
+        self.assertEqual(state, "running")
+
+    def test_a_worker_showing_this_files_pattern_list_is_not_exhausted(self):
+        for line in pattern_source_lines():
+            screen = "⏺ Read(bin/crew)\n  ⎿  QUOTA_PATTERNS = [\n" + line
+            self.assertNotEqual(self.state(screen), "quota", line)
+
+    def test_the_task_crew_typed_coming_back_on_screen_is_not_exhaustion(self):
+        # crew types the task into the composer and the agent draws it back.
+        task = "reword the usage limit reached banner so it names the reset time"
+        screen = ("⏵⏵ accept edits on\n"
+                  "> " + task)
+        self.assertEqual(self.state(screen, task=task), "running")
+
+
+class AwaitReadyExhaustionTest(unittest.TestCase):
+    """The same check at spawn time, where the screen is mostly crew's doing."""
+
+    def setUp(self):
+        self.crew = crew_module()
+
+    def ready(self, screen, name="w", **rec):
+        self.crew.read_screen = lambda ws, surface, lines=40: screen
+        return self.crew.await_ready("ws", "s", self.crew.AGENTS["claude"], 5,
+                                     self.crew.crew_text(name, rec))
+
+    def test_a_welcome_screen_in_a_limit_named_worktree_is_ready(self):
+        state, detail = self.ready(
+            QUOTA_NAMED_WELCOME, name="fix-quota-detect",
+            cwd="/Users/k/github/crew/.crew/worktrees/fix-quota-detect",
+            task="fix quota detection")
+        self.assertEqual(state, "ready", detail)
+
+    def test_the_task_crew_just_typed_does_not_read_as_exhaustion(self):
+        task = "reword the usage limit reached banner so it names the reset time"
+        state, detail = self.ready(
+            "  ⏵⏵ accept edits on (shift+tab to cycle)\n> " + task, task=task)
+        self.assertEqual(state, "ready", detail)
+
+    def test_a_session_that_really_ran_out_is_caught_before_anything_is_typed(self):
+        state, detail = self.ready(CLAUDE_EXHAUSTED)
+        self.assertEqual(state, "quota", detail)
+
+
+class StallFingerprintTest(unittest.TestCase):
+    """What counts as the screen changing.
+
+    A spinner, a clock and a token counter all move on their own, so a screen
+    that changes only there has not made progress.
+    """
+
+    def setUp(self):
+        self.crew = crew_module()
+
+    def same(self, before, after):
+        return (self.crew.screen_fingerprint(before)
+                == self.crew.screen_fingerprint(after))
+
+    def test_a_spinner_frame_is_not_progress(self):
+        self.assertTrue(self.same("⠋ Working… (12s)", "⠙ Working… (12s)"))
+
+    def test_a_clock_tick_is_not_progress(self):
+        self.assertTrue(self.same("✻ Herding… 14:03:21", "✻ Herding… 14:07:44"))
+
+    def test_a_token_counter_is_not_progress(self):
+        self.assertTrue(self.same(
+            "✻ Herding… (esc to interrupt · 47s · ↑ 3.2k tokens)",
+            "✽ Herding… (esc to interrupt · 4m 2s · ↑ 9.8k tokens)"))
+
+    def test_a_slow_but_advancing_screen_is_progress(self):
+        self.assertFalse(self.same(
+            "⏺ Read(a.py)\n⠋ Working… (12s · 1.0k tokens)",
+            "⏺ Read(a.py)\n⏺ Read(b.py)\n⠙ Working… (13s · 1.1k tokens)"))
+
+
+class StallStateTest(unittest.TestCase):
+    """And what refresh does with it."""
+
+    def setUp(self):
+        self.crew = crew_module()
+        self.crew.put_worker = lambda name, w: None
+
+    def state(self, before, after, quiet_minutes=16):
+        self.crew.read_screen = lambda ws, surface, lines=40: after
+        cfg = dict(self.crew.DEFAULTS)
+        cfg["agents"] = {"a": {}}
+        w = {"agent": "a", "surface": "s", "workspace": "ws", "role": "worker",
+             "task": "t", "fp": self.crew.screen_fingerprint(before),
+             "fp_at": time.time() - quiet_minutes * 60}
+        sessions = {"s": {"state": "running", "pid": os.getpid()}}
+        return self.crew.refresh({"w": w}, sessions, cfg)["w"][0]
+
+    def test_a_worker_whose_only_change_is_its_counters_is_stalled(self):
+        before = "⏺ Read(bin/crew)\n✻ Herding… (esc to interrupt · 47s · ↑ 3.2k tokens)"
+        after = "⏺ Read(bin/crew)\n✽ Herding… (esc to interrupt · 21m 4s · ↑ 9.8k tokens)"
+        self.assertEqual(self.state(before, after), "stalled")
+
+    def test_a_worker_that_is_still_producing_output_is_not_stalled(self):
+        before = "⏺ Read(bin/crew)\n✻ Herding… (47s · ↑ 3.2k tokens)"
+        after = "⏺ Read(bin/crew)\n⏺ Edit(bin/crew)\n✽ Herding… (21m 4s · ↑ 9.1k tokens)"
+        self.assertEqual(self.state(before, after), "running")
+
+
 class ProjectRolesTest(unittest.TestCase):
     def test_a_repo_can_define_roles_of_its_own(self):
         # A codebase with its own vocabulary gets a crew that speaks it, and
