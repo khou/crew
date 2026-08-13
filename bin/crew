@@ -984,7 +984,16 @@ def cmd_stop(args, cfg):
             "it anyway. Anything it has written is kept either way.", 1)
 
     where = worker_dir(args.worker, w, sessions)
+    pid = (sessions.get(w["surface"]) or {}).get("pid")
     cmux("close-surface", "--workspace", w["workspace"], "--surface", w["surface"])
+    # Wait for it to actually go. Closing the tab signals the process; it does
+    # not wait for it. Returning early means the very next reap sees the
+    # worktree as still in use and skips it, and the merge after that finds an
+    # empty branch, which is exactly the order this tool tells you to use.
+    for _ in range(20):
+        if not pid or not pid_alive(pid):
+            break
+        time.sleep(0.5)
     marker = exit_marker(w["surface"])
     if os.path.exists(marker):
         os.remove(marker)
@@ -992,6 +1001,17 @@ def cmd_stop(args, cfg):
 
     branch = worker_branch(where) if where and os.path.isdir(where) else None
     log(f"stopped {args.worker}, it was {state}")
+    if where and os.path.isdir(where):
+        rc, holders = run(["lsof", "-a", "-d", "cwd", "-t", "--", where])
+        if rc == 0 and holders.strip():
+            # Closing the tab orphans the agent's helper processes, and the
+            # cmux feed bridge parks for up to two minutes waiting for a
+            # decision that is never coming. Reap will refuse while they hold
+            # the directory, which is correct, so say so rather than let the
+            # next command look broken.
+            log(f"  {len(holders.split())} helper process(es) still hold its "
+                "worktree; they exit within about two minutes. Reap will skip "
+                "it until then, so run reap again if it does.")
     if branch:
         log(f"  its work is on {branch}")
         log(f"  crew reap --apply, then crew merge {branch}")

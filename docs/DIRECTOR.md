@@ -106,6 +106,11 @@ If a worker committed its own work, `crew merge <worker>` also works directly,
 before stopping it. Merge takes a worker name or a branch, so it keeps working
 after the worker is gone.
 
+Reap may skip a worker you have only just stopped. Closing a tab leaves the
+agent's helper processes holding the directory for up to about two minutes,
+and reap will not touch a worktree in use. That is the check working. Run reap
+again, or come back to it after the next piece of work.
+
 Each step refuses rather than guesses: merge will not run while the worker is
 working, into a checkout with tracked changes, or while its worktree still
 holds uncommitted work that is not on the branch.
