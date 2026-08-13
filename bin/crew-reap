@@ -571,12 +571,22 @@ def main():
     if args.idle_minutes is not None:
         cfg["idle_minutes"] = args.idle_minutes
 
-    repos = [primary_checkout(os.path.expanduser(r)) for r in args.repo] if args.repo \
-        else find_repos(resolve_roots(cfg))
+    bad_repos = []
+    if args.repo:
+        repos = []
+        for r in args.repo:
+            expanded = os.path.expanduser(r)
+            if not os.path.isdir(expanded):
+                bad_repos.append(r)
+                log(f"warning: --repo {r} does not exist, skipping")
+                continue
+            repos.append(primary_checkout(expanded))
+    else:
+        repos = find_repos(resolve_roots(cfg))
     if not repos:
         log("no git repos found. Pass --repo <path>, or set roots in "
             + CONFIG_PATH)
-        return 0
+        return 2 if bad_repos else 0
 
     running = process_cwds()
     if running is None:
@@ -597,7 +607,7 @@ def main():
         if not args.quiet:
             for d in plans:
                 log(f"  skip  {d['path']}\n        {d['reason']}")
-        return 0
+        return 2 if bad_repos else 0
 
     log("dry run, nothing has changed. Pass --apply to execute.\n" if not args.apply else "")
     reclaimable = 0
@@ -622,7 +632,7 @@ def main():
     log(f"\n{len(actionable)} worktree(s), {human(reclaimable)} reclaimable")
 
     if not args.apply:
-        return 0
+        return 2 if bad_repos else 0
 
     log("")
     failures = 0
@@ -636,7 +646,7 @@ def main():
             failures += 1
             log(f"FAILED  {d['path']}: {msg}")
     log(f"\nfreed {human(freed)}, {failures} failure(s)")
-    return 1 if failures else 0
+    return 1 if failures or bad_repos else 0
 
 
 if __name__ == "__main__":
