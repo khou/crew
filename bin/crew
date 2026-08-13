@@ -1349,10 +1349,11 @@ def main():
         rest = sys.argv[2:]
         # Scoped to the repos this director is actually working in: the one
         # you are standing in, plus every repo it has put a worker in, since a
-        # project can span several. crew-reap on its own sweeps the whole
-        # machine by design, which is right for a person running it
-        # deliberately and very wrong for a director following the loop: one
-        # did exactly that and reaped eighteen worktrees across four unrelated
+        # project can span several. crew-reap on its own scans configured
+        # roots, or the parent directory of whatever repo you are standing
+        # in, by design, which is right for a person running it deliberately
+        # and very wrong for a director following the loop: one did exactly
+        # that and reaped eighteen worktrees across four unrelated sibling
         # projects. Their work survived on branches, but nobody asked for it.
         if not any(a == "--repo" or a.startswith("--repo=") for a in rest):
             scope = []

@@ -22,8 +22,9 @@ HOME = os.path.expanduser("~")
 CONFIG_PATH = os.environ.get(
     "CREW_REAP_CONFIG", os.path.join(HOME, ".config", "crew", "reap.json"))
 
-# Where projects usually live. Only those that exist are scanned, and only
-# when you do not name a repo or run from inside one.
+# Where projects usually live. Only those that exist are scanned, and only as
+# a last resort: naming a repo skips this, and running from inside one scans
+# that repo's parent directory (its siblings) instead.
 COMMON_ROOTS = ["src", "code", "dev", "projects", "repos", "git", "github", "work"]
 
 DEFAULTS = {
