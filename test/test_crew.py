@@ -190,6 +190,17 @@ class StaleNeedsInputTest(unittest.TestCase):
     def test_a_login_screen_still_counts_as_needing_input(self):
         self.assertEqual(self.state("Press any key to log in"), "needsInput")
 
+    def test_stale_state_clears_for_an_agent_with_no_approval_block(self):
+        # codex and cursor define "blocked" but no "approval" prompt. The
+        # stale-clear must not require an approval block to exist.
+        self.crew.read_screen = lambda ws, surface, lines=40: "the work is done, at the prompt"
+        cfg = dict(self.crew.DEFAULTS)
+        cfg["agents"] = {"a": {"blocked": [r"Press any key to log in"]}}
+        w = {"agent": "a", "surface": "s", "workspace": "ws", "role": "r",
+             "task": "t", "fp": "x", "fp_at": time.time()}
+        sessions = {"s": {"state": "needsInput", "pid": os.getpid()}}
+        self.assertEqual(self.crew.refresh({"w": w}, sessions, cfg)["w"][0], "idle")
+
 
 class DeliverTest(unittest.TestCase):
     """A blocked screen must never be typed at, not even a probe."""

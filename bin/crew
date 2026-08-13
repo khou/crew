@@ -829,7 +829,8 @@ def refresh(all_w, sessions, cfg):
         # ever saying so, leaving a stale record that makes a director relay
         # a question nobody is asking. If nothing on screen is waiting for an
         # answer, it is not waiting.
-        if state == "needsInput" and screen and spec.get("approval"):
+        if state == "needsInput" and screen and (
+                spec.get("approval") or spec.get("blocked")):
             # Only for agents whose asking looks like something crew can
             # recognise. Without a known prompt shape there is no way to tell
             # a finished turn from a real question, and guessing idle would
