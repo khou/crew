@@ -736,6 +736,57 @@ class SayAcceptsAQuietScreenLifecycleWorkerTest(unittest.TestCase):
         self.assertEqual(self.delivered, {})
 
 
+class DoctorWithASparseAgentTest(unittest.TestCase):
+    """A config-added agent missing required fields must be reported by
+    name, not crash doctor with a KeyError."""
+
+    def setUp(self):
+        self.crew = crew_module()
+
+    def test_doctor_names_the_agent_and_missing_fields_without_a_traceback(self):
+        cfg = dict(self.crew.DEFAULTS)
+        cfg["agents"] = {"sparse": {"bin": "true"}}
+        cfg["roles"] = {}
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = self.crew.cmd_doctor(types.SimpleNamespace(), cfg)
+        printed = out.getvalue()
+        self.assertNotEqual(rc, 0)
+        self.assertIn("sparse", printed)
+        for field in ("worktree", "args", "ready", "blocked"):
+            self.assertIn(field, printed)
+        self.assertNotIn("Traceback", printed)
+
+
+class SpawnRefusesASparseAgentTest(unittest.TestCase):
+    """A config-added agent missing required fields must be rejected before
+    spawn touches cmux, so a tab is never orphaned waiting on a field crew
+    never checked."""
+
+    def setUp(self):
+        self.crew = crew_module()
+        self.crew.workers = lambda: {}
+        self.crew.hook_sessions = lambda: {}
+        self.calls = []
+        self.crew.cmux = lambda *a, **k: (self.calls.append(a), (1, "unexpected"))[1]
+
+    def test_spawn_dies_before_any_cmux_call(self):
+        cfg = dict(self.crew.DEFAULTS)
+        cfg["agents"] = {"sparse": {"bin": "true"}}
+        cfg["roles"] = {"worker": {"agent": "sparse", "permission": "edit"}}
+        args = types.SimpleNamespace(role="worker", task="do a thing", name=None,
+                                     cwd=None, no_task=False)
+        out = io.StringIO()
+        with self.assertRaises(SystemExit) as ctx:
+            with contextlib.redirect_stdout(out):
+                self.crew.cmd_spawn(args, cfg)
+        self.assertEqual(ctx.exception.code, 1)
+        printed = out.getvalue()
+        self.assertIn("sparse", printed)
+        self.assertNotIn("Traceback", printed)
+        self.assertEqual(self.calls, [], "cmux was called before validation")
+
+
 class InstallUninstallTest(unittest.TestCase):
     """--uninstall must remove both links when run through the installed symlink.
 
