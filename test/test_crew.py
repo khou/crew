@@ -342,6 +342,34 @@ class DeliverTest(unittest.TestCase):
         sent = [c for c in calls if c[0] in ("send", "send-key")]
         self.assertEqual(sent, [], f"blocked screen was typed at: {sent}")
 
+    def test_a_wrapped_login_route_mention_is_not_blocked(self):
+        # Terminal wrapping can put a worker's own text about a web app's
+        # /login route alone on a visual line, which a line-anchored bare
+        # "/login" pattern used to match.
+        def fake_cmux(*args, timeout=60):
+            if args[0] == "read-screen":
+                return 0, "hello there\nEditing src/routes/login.ts, the POST\n/login\nhandler"
+            return 0, ""
+
+        self.crew.cmux = fake_cmux
+
+        ok, why = self.crew.deliver("ws", "s", "hello there", self.crew.AGENTS["claude"])
+
+        self.assertTrue(ok, why)
+
+    def test_claudes_own_login_instruction_is_still_blocked(self):
+        def fake_cmux(*args, timeout=60):
+            if args[0] == "read-screen":
+                return 0, "Invalid API key · Please run /login"
+            return 0, ""
+
+        self.crew.cmux = fake_cmux
+
+        ok, why = self.crew.deliver("ws", "s", "hello there", self.crew.AGENTS["claude"])
+
+        self.assertFalse(ok)
+        self.assertIn("only you can answer", why)
+
 
 class QuotaOnlyInTheTailTest(unittest.TestCase):
     """A worker writing about limits is not a worker that has hit one."""
