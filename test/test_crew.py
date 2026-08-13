@@ -237,7 +237,8 @@ class MergeSelfTest(unittest.TestCase):
         subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
                         "commit", "-qm", "i"], cwd=self.repo, capture_output=True)
         self.crew.hook_sessions = lambda: {}
-        self.crew.worker_state = lambda w, sessions: ("idle", {})
+        self.crew.refresh = lambda all_w, sessions, cfg: {
+            name: ("idle", ww) for name, ww in all_w.items()}
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -251,7 +252,7 @@ class MergeSelfTest(unittest.TestCase):
         os.chdir(self.repo)
         try:
             with self.assertRaises(SystemExit):
-                self.crew.cmd_merge(args, {})
+                self.crew.cmd_merge(args, {"agents": {}})
         finally:
             os.chdir(cwd)
         out = subprocess.run(["git", "-C", self.repo, "log", "--oneline"],
@@ -687,13 +688,52 @@ class SayToAWorkerWithARemovedAgentTest(unittest.TestCase):
             "sparse": {"agent": "claude", "surface": "s1", "workspace": "ws"},
         }
         self.crew.hook_sessions = lambda: {}
+        self.crew.read_screen = lambda ws, surface, lines=40: ""
+        self.crew.put_worker = lambda name, w: None
         delivered = {}
         self.crew.deliver = lambda ws, surface, text, spec: delivered.update(
             ws=ws, surface=surface, text=text, spec=spec) or (True, "")
         args = types.SimpleNamespace(worker="sparse", message="hi", now=False)
-        cfg = {"agents": {"claude": {}}}
+        cfg = dict(self.crew.DEFAULTS)
+        cfg["agents"] = {"claude": {}}
         self.assertEqual(self.crew.cmd_say(args, cfg), 0)
         self.assertEqual(delivered["spec"], {})
+
+
+class SayAcceptsAQuietScreenLifecycleWorkerTest(unittest.TestCase):
+    """status and wait read a quiet screen-lifecycle worker as idle; say must
+    agree, or a director that waited for idle still gets refused."""
+
+    def setUp(self):
+        self.crew = crew_module()
+        self.crew.read_screen = lambda ws, surface, lines=40: "a still screen"
+        self.crew.put_worker = lambda name, w: None
+        w = {"agent": "a", "surface": "s", "workspace": "ws", "role": "r",
+             "task": "t", "fp": self.crew.screen_fingerprint("a still screen"),
+             "fp_at": time.time() - 30}
+        self.crew.workers = lambda: {"w1": w}
+        self.crew.hook_sessions = lambda: {"s": {"state": "running", "pid": os.getpid()}}
+        self.delivered = {}
+        self.crew.deliver = lambda ws, surface, text, spec: self.delivered.update(
+            ws=ws, surface=surface, text=text, spec=spec) or (True, "")
+
+    def test_say_delivers_to_a_worker_the_screen_shows_as_idle(self):
+        cfg = dict(self.crew.DEFAULTS)
+        cfg["agents"] = {"a": {"lifecycle": "screen"}}
+        args = types.SimpleNamespace(worker="w1", message="hi", now=False)
+        self.assertEqual(self.crew.cmd_say(args, cfg), 0)
+        self.assertEqual(self.delivered["text"], "hi")
+
+    def test_say_refuses_a_stalled_worker_without_now(self):
+        # Stalled still means an active mid-turn process; only idle should
+        # let a plain say through.
+        cfg = dict(self.crew.DEFAULTS)
+        cfg["agents"] = {"a": {}}
+        cfg["stall_minutes"] = 0.4
+        args = types.SimpleNamespace(worker="w1", message="hi", now=False)
+        with self.assertRaises(SystemExit):
+            self.crew.cmd_say(args, cfg)
+        self.assertEqual(self.delivered, {})
 
 
 class InstallUninstallTest(unittest.TestCase):
