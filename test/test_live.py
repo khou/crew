@@ -17,6 +17,7 @@ Run: python3 test/test_live.py
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -27,10 +28,38 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CREW = os.path.join(HERE, "..", "bin", "crew")
 IN_CMUX = bool(os.environ.get("CMUX_SURFACE_ID")) and shutil.which("cmux")
 
+# The workspace this suite was started from, captured before anything is
+# redirected. Nothing these tests open may ever land here.
+CALLER_WS = os.environ.get("CMUX_WORKSPACE_ID")
+
+UUID = re.compile(r"[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}")
+REF = re.compile(r"\b(workspace|pane|surface):\d+\b")
+
 
 def cmux(*args):
     env = dict(os.environ, CMUX_QUIET="1")
     return subprocess.run(["cmux", *args], capture_output=True, text=True, env=env)
+
+
+def first_surface_in(ws_ref):
+    """The workspace's UUID and that of the first surface inside it.
+
+    cmux prints short refs like workspace:41 by default, and it reuses them as
+    workspaces come and go, so everything downstream is given UUIDs instead.
+    """
+    ws_uuid, inside = None, False
+    for line in cmux("tree", "--all", "--id-format", "both").stdout.splitlines():
+        ref, uuid = REF.search(line), UUID.search(line)
+        if not ref or not uuid:
+            continue
+        kind = ref.group(0).split(":")[0]
+        if kind == "workspace":
+            inside = ref.group(0) == ws_ref
+            if inside:
+                ws_uuid = uuid.group(0)
+        elif kind == "surface" and inside:
+            return ws_uuid, uuid.group(0)
+    return ws_uuid, None
 
 
 def fake(name, worktree="crew", **extra):
@@ -48,6 +77,38 @@ def fake(name, worktree="crew", **extra):
 
 @unittest.skipUnless(IN_CMUX, "needs to run inside a cmux terminal")
 class LiveTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        """Open a workspace of this suite's own for the tabs to land in.
+
+        crew puts workers in the caller's workspace and pane, which it learns
+        from cmux identify, and identify reads the caller out of the
+        environment. So pointing CMUX_WORKSPACE_ID and CMUX_SURFACE_ID at a
+        workspace made here is enough to keep every tab these tests open away
+        from whoever is running them. bin/crew needs no test-only hook for it.
+        """
+        p = cmux("new-workspace", "--name", "crew-live-tests", "--focus", "false")
+        ref = REF.search(p.stdout or "")
+        if p.returncode != 0 or not ref:
+            raise RuntimeError(
+                f"could not open a workspace for the tests: {p.stdout}{p.stderr}")
+        cls.ws_ref = ref.group(0)
+        # The surface is created a moment after the workspace it lives in.
+        for _ in range(40):
+            cls.ws, cls.surface = first_surface_in(cls.ws_ref)
+            if cls.ws and cls.surface:
+                break
+            time.sleep(0.25)
+        else:
+            cmux("close-workspace", "--workspace", cls.ws_ref)
+            raise RuntimeError(f"{cls.ws_ref} never came up with a surface")
+
+    @classmethod
+    def tearDownClass(cls):
+        # Closing the workspace takes any tab a test left behind with it.
+        if getattr(cls, "ws", None):
+            cmux("close-workspace", "--workspace", cls.ws)
+
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="crew-live-")
         self.repo = os.path.join(self.tmp, "repo")
@@ -91,7 +152,8 @@ class LiveTest(unittest.TestCase):
 
     def crew(self, *args):
         env = dict(os.environ, CREW_CONFIG=self.cfg_path, CREW_STATE=self.state,
-                   CREW_HOOKS_DIR=self.hooks)
+                   CREW_HOOKS_DIR=self.hooks,
+                   CMUX_WORKSPACE_ID=self.ws, CMUX_SURFACE_ID=self.surface)
         return subprocess.run([CREW, *args], capture_output=True, text=True,
                               env=env, cwd=self.repo)
 
@@ -119,6 +181,18 @@ class LiveTest(unittest.TestCase):
             }}}, fh)
 
     # tests ---------------------------------------------------------------
+    def test_workers_never_land_in_the_workspace_the_suite_was_started_from(self):
+        # These tests open real tabs. Without a workspace of their own they
+        # opened in the pane that ran them, on top of whatever the person was
+        # doing, which is why this suite used to be unsafe to run at will.
+        self.assertTrue(CALLER_WS, "no caller workspace to be isolated from")
+        self.crew("spawn", "f", "a task", "--name", "iso1", "--no-task")
+        landed = self.workers()["iso1"]["workspace"]
+        self.assertEqual(landed, self.ws,
+                         "worker did not land in the suite's own workspace")
+        self.assertNotEqual(landed, CALLER_WS,
+                            "worker opened in the caller's workspace")
+
     def test_spawn_opens_a_tab_and_waits_for_the_prompt(self):
         p = self.crew("spawn", "f", "do a thing", "--name", "w1", "--no-task")
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
