@@ -410,6 +410,30 @@ class QuotaPatternTest(unittest.TestCase):
             self.assertEqual(hits, [], f"false positive on a healthy screen: {line}")
 
 
+class ProjectRolesTest(unittest.TestCase):
+    def test_a_repo_can_define_roles_of_its_own(self):
+        # A codebase with its own vocabulary gets a crew that speaks it, and
+        # the definitions travel with the repo rather than living in one
+        # person's home directory.
+        tmp = tempfile.mkdtemp(prefix="crew-proj-")
+        try:
+            subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp,
+                           capture_output=True)
+            with open(os.path.join(tmp, ".crew.json"), "w") as fh:
+                json.dump({"roles": {"art-director": {
+                    "agent": "claude", "model": "opus", "permission": "plan"}}}, fh)
+            here = os.getcwd()
+            os.chdir(tmp)
+            try:
+                cfg = crew_module().config()
+            finally:
+                os.chdir(here)
+            self.assertIn("art-director", cfg["roles"])
+            self.assertIn("worker", cfg["roles"], "the built-in roles were lost")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 class WaitTest(unittest.TestCase):
     def test_a_change_is_printed_before_it_is_marked_seen(self):
         # Interrupting between the two can then only repeat a change, never

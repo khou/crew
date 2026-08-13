@@ -47,6 +47,10 @@ EXIT_DIR = os.path.join(os.path.dirname(STATE_PATH), "exited")
 
 REQUIRED_BINARIES = ("git", "cmux")
 
+# A project's own crew settings, at the root of the repo, so roles a codebase
+# needs travel with it. Shared with crew-reap, which reads its rescue list.
+REPO_CONFIG = ".crew.json"
+
 # How each agent is launched and how we know it started.
 #
 # Placeholders: {model} {effort} {worktree} {cwd} {name}. An argument
@@ -256,6 +260,19 @@ def config():
     for name, override in (cfg.get("roles") or {}).items():
         roles.setdefault(name, {}).update(override)
     cfg["roles"] = roles
+
+    rc, top = run(["git", "rev-parse", "--show-toplevel"])
+    project = load_json(os.path.join(top, REPO_CONFIG), {}) if rc == 0 and top else {}
+    for key in ("agents", "roles"):
+        if project.get(key):
+            merged = dict(cfg.get(key) or {})
+            for name, spec in project[key].items():
+                merged.setdefault(name, {}).update(spec) if isinstance(
+                    merged.get(name), dict) else merged.__setitem__(name, spec)
+            cfg[key] = merged
+    for key, val in project.items():
+        if key not in ("agents", "roles", "rescue"):
+            cfg[key] = val
     return cfg
 
 
