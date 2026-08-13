@@ -482,10 +482,25 @@ def pid_alive(pid):
 
 # --- commands -------------------------------------------------------------
 
+# What every agent spec must have before doctor or spawn touches it. A
+# config-added agent that omits one of these fails deep inside launch logic
+# with a bare KeyError instead of a message naming what's missing.
+REQUIRED_AGENT_FIELDS = ("bin", "worktree", "args", "ready", "blocked")
+
+
+def missing_agent_fields(spec):
+    return [f for f in REQUIRED_AGENT_FIELDS if f not in spec]
+
+
 def cmd_doctor(args, cfg):
     log(f"{'agent':10} {'launched as':40} {'found via':14} {'worktree':9} version")
     problems = 0
     for name, spec in sorted(cfg["agents"].items()):
+        missing = missing_agent_fields(spec)
+        if missing:
+            log(f"{name:10} missing required field(s): {', '.join(missing)}")
+            problems += 1
+            continue
         launch_as, how = resolve_launch(spec["bin"])
         if not launch_as:
             log(f"{name:10} {'(not found)':40} {'-':14} {spec['worktree']:9} missing")
@@ -516,6 +531,10 @@ def cmd_spawn(args, cfg):
     spec = cfg["agents"].get(role["agent"])
     if not spec:
         die(f"role {args.role} uses unknown agent {role['agent']}")
+    missing = missing_agent_fields(spec)
+    if missing:
+        die(f"agent {role['agent']} is missing required field(s): "
+            f"{', '.join(missing)}. Fix its entry in crew.json.", 1)
 
     sessions = hook_sessions()
     seen = refresh(workers(), sessions, cfg)
