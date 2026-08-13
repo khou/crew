@@ -67,10 +67,15 @@ def log(msg=""):
 
 
 def run(args, cwd=None, check=False, timeout=120):
-    p = subprocess.run(
-        args, cwd=cwd, check=check, timeout=timeout,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-    )
+    try:
+        p = subprocess.run(
+            args, cwd=cwd, check=check, timeout=timeout,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+    except OSError as e:
+        # cwd can go while we are working: another agent removing its own
+        # worktree must fail this one plan, not abort every plan behind it.
+        return 1, str(e)
     return p.returncode, p.stdout.strip()
 
 
@@ -182,7 +187,7 @@ def pid_alive(pid):
         return True
     except PermissionError:
         return True
-    except (OSError, ValueError, TypeError):
+    except (OSError, ValueError, TypeError, OverflowError):
         return False
 
 
@@ -199,7 +204,9 @@ def registry_cwds(patterns):
             try:
                 with open(path) as fh:
                     data = json.load(fh)
-            except (OSError, ValueError):
+            # These files belong to other tools and are read as found. A deep
+            # one exhausts json's recursion limit, which is not a ValueError.
+            except (OSError, ValueError, RecursionError):
                 continue
             stack = [data]
             while stack:
@@ -263,11 +270,19 @@ def list_worktrees(repo):
     ~/.cursor/worktrees and ~/.codex/worktrees, but git records all of them,
     so one command finds the lot.
     """
-    rc, out = run(["git", "worktree", "list", "--porcelain"], cwd=repo)
+    # -z ends each field with a NUL instead of a newline. Without it a
+    # worktree path containing a newline splits its own record in two, and the
+    # truncated head of the path reads as a directory that is not there.
+    rc, out = run(["git", "worktree", "list", "--porcelain", "-z"], cwd=repo)
+    fields = out.split("\0")
+    if rc != 0:
+        # git before 2.36 has no -z.
+        rc, out = run(["git", "worktree", "list", "--porcelain"], cwd=repo)
+        fields = out.splitlines()
     if rc != 0:
         return []
     trees, cur = [], {}
-    for line in out.splitlines():
+    for line in fields:
         if not line.strip():
             if cur:
                 trees.append(cur)
@@ -381,7 +396,7 @@ def rescue_missing(wt_path, repo, rel):
     return missing, nbytes
 
 
-def plan_worktree(repo, wt, cfg, live):
+def plan_worktree(repo, wt, cfg, live, siblings=()):
     """Decide what to do with one worktree. No side effects."""
     path = wt["path"]
     d = {"repo": repo, "path": path, "branch": wt.get("branch"),
@@ -389,8 +404,11 @@ def plan_worktree(repo, wt, cfg, live):
          "action": None, "reason": "", "size": 0, "dirty": [], "rescue": []}
 
     if not os.path.isdir(path):
+        # The record is the only gc root left for a detached HEAD, so pruning
+        # it is what makes those commits collectable. Carry the sha across.
         d["action"] = "prune"
         d["reason"] = "directory is gone, git record is stale"
+        d["head"] = wt.get("head")
         return d
 
     if wt.get("primary") or os.path.realpath(path) == os.path.realpath(repo):
@@ -402,6 +420,16 @@ def plan_worktree(repo, wt, cfg, live):
         if is_under(cwd, path):
             d["action"] = "skip"
             d["reason"] = "in use by a running process"
+            return d
+
+    for other in siblings:
+        # Agent worktrees live in a gitignored directory, so one nested
+        # inside another never shows up in git status. `git worktree remove`
+        # deletes the whole tree and takes the inner worktree's uncommitted
+        # work with it.
+        if other != path and is_under(other, path):
+            d["action"] = "skip"
+            d["reason"] = f"holds another worktree, {other}"
             return d
 
     if wt["locked"]:
@@ -477,11 +505,44 @@ def plan_worktree(repo, wt, cfg, live):
     return d
 
 
+def rescue_branch(path):
+    """Where a worktree's otherwise-homeless commits go.
+
+    Named after the directory, but a directory name is not a ref name: a
+    space, a colon or a trailing .lock all make git refuse the branch, and a
+    worktree whose rescue branch cannot be created is one that can never be
+    reaped. Two directories can map to the same name, which the caller
+    already handles by refusing to move an existing branch.
+    """
+    name = "".join(c if c.isalnum() or c in "-_" else "-"
+                   for c in os.path.basename(path))
+    return "crew-rescued/" + (name.lstrip("-") or "worktree")
+
+
+def save_detached(repo, path, sha):
+    """Anchor a detached worktree's commits to a branch before it goes away."""
+    name = rescue_branch(path)
+    rc, out = run(["git", "branch", name, sha], cwd=repo)
+    if rc == 0:
+        return True, ""
+    if "already exists" not in out:
+        return False, f"could not save detached commits to a branch: {out}"
+    rc, existing_sha = run(["git", "rev-parse", name], cwd=repo)
+    if rc != 0 or existing_sha != sha:
+        return False, (f"rescue branch {name} already exists and points "
+                       f"elsewhere, worktree left in place: {out}")
+    return True, ""
+
+
 def apply_plan(d):
     """Execute one plan. Every step is safe to re-run after a crash."""
     path, repo = d["path"], d["repo"]
 
     if d["action"] == "prune":
+        if d.get("detached") and d.get("head"):
+            ok, msg = save_detached(repo, path, d["head"])
+            if not ok:
+                return False, msg
         run(["git", "worktree", "prune"], cwd=repo)
         return True, "pruned stale record"
 
@@ -500,7 +561,7 @@ def apply_plan(d):
         # Leftovers never land on a shared branch. Move to a rescue branch
         # first, so main stays exactly where it was.
         if d.get("protected"):
-            name = "crew-rescued/" + os.path.basename(path)
+            name = rescue_branch(path)
             rc, out = run(["git", "switch", "-c", name], cwd=path)
             if rc != 0:
                 return False, f"could not move off {d['branch']}: {out}"
@@ -522,17 +583,9 @@ def apply_plan(d):
     if d.get("detached"):
         rc, sha = run(["git", "rev-parse", "HEAD"], cwd=path)
         if rc == 0 and sha:
-            name = "crew-rescued/" + os.path.basename(path)
-            rc2, out2 = run(["git", "branch", name, sha], cwd=repo)
-            if rc2 != 0:
-                if "already exists" not in out2:
-                    return False, f"could not save detached commits to a branch: {out2}"
-                rc3, existing_sha = run(["git", "rev-parse", name], cwd=repo)
-                if rc3 != 0 or existing_sha != sha:
-                    return False, (
-                        f"rescue branch {name} already exists and points "
-                        f"elsewhere, worktree left in place: {out2}"
-                    )
+            ok, msg = save_detached(repo, path, sha)
+            if not ok:
+                return False, msg
 
     if d["locked"]:
         # Only ever an agent's own stale lock: a lock set by a person is
@@ -599,8 +652,10 @@ def main():
     live = running | registry_cwds(cfg["session_registries"])
     plans = []
     for repo in repos:
-        for wt in list_worktrees(repo):
-            d = plan_worktree(repo, wt, cfg, live)
+        trees = list_worktrees(repo)
+        paths = [w["path"] for w in trees]
+        for wt in trees:
+            d = plan_worktree(repo, wt, cfg, live, paths)
             if d["action"] != "skip" or not args.quiet:
                 plans.append(d)
 
@@ -621,7 +676,7 @@ def main():
             + (f", {len(d['dirty'])} uncommitted file(s)" if d["dirty"] else ""))
         if d.get("protected"):
             log(f"{'':14} {d['branch']} is protected, leftovers go to "
-                f"crew-rescued/{os.path.basename(d['path'])} instead")
+                f"{rescue_branch(d['path'])} instead")
         for rel, count, sz in d["rescue"]:
             log(f"{'':14} rescue {count} file(s) ({human(sz)}) under {rel}, "
                 f"absent from the primary checkout")
