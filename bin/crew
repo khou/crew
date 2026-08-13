@@ -22,6 +22,8 @@ Nothing here runs in the background. Each command does one thing and exits.
 """
 
 import argparse
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -362,6 +364,25 @@ def prune_orphan_flags(argv, spec):
 
 # --- worker state ---------------------------------------------------------
 
+@contextlib.contextmanager
+def state_lock():
+    """Serialize read-modify-write access to STATE_PATH across processes.
+
+    Without this, two concurrent commands (e.g. a status refresh and a stop)
+    can each read the same snapshot, and whichever writes last silently
+    overwrites the other's change, resurrecting a worker crew stop just
+    removed.
+    """
+    os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
+    lock_path = STATE_PATH + ".lock"
+    with open(lock_path, "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
 def workers():
     """The workers. Keys beginning with an underscore are crew's own notes,
     such as which workspace this director's fleet lives in, and are not
@@ -370,16 +391,29 @@ def workers():
             if not k.startswith("_")}
 
 
-def put_worker(name, data):
-    all_w = workers()
-    all_w[name] = data
-    save_json(STATE_PATH, all_w)
+def put_worker(name, data, create=False):
+    """Write a worker's record, holding the lock across the read and write.
+
+    Every caller except spawn is updating a record it read earlier, possibly
+    a while ago. If crew stop dropped that worker in the meantime, writing
+    the caller's now-stale copy back would resurrect it, so create defaults
+    to False and such a write is skipped when the worker is already gone.
+    Only spawn, which is creating the record for the first time, passes
+    create=True.
+    """
+    with state_lock():
+        all_w = load_json(STATE_PATH, {})
+        if not create and name not in all_w:
+            return
+        all_w[name] = data
+        save_json(STATE_PATH, all_w)
 
 
 def drop_worker(name):
-    all_w = workers()
-    all_w.pop(name, None)
-    save_json(STATE_PATH, all_w)
+    with state_lock():
+        all_w = load_json(STATE_PATH, {})
+        all_w.pop(name, None)
+        save_json(STATE_PATH, all_w)
 
 
 def hook_sessions():
@@ -519,7 +553,8 @@ def cmd_spawn(args, cfg):
 
     put_worker(name, {"role": args.role, "agent": role["agent"], "task": args.task,
                       "surface": surface, "workspace": ws, "repo": repo,
-                      "cwd": cwd, "argv": argv, "started": int(time.time())})
+                      "cwd": cwd, "argv": argv, "started": int(time.time())},
+              create=True)
 
     state, detail = await_ready(ws, surface, spec, cfg["ready_timeout"])
     if state != "ready":
