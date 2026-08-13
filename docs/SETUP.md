@@ -26,6 +26,27 @@ what reaches you comes from the director. That is the whole point: the
 director is escalated to, and escalates onward, so notifications should come
 from it and not from six workers at once.
 
+One gap remains, and it is not fixed. cmux raises its own
+`agentPermissionPrompt` notification when a worker stops for permission, and
+that selects the worker's workspace, pulling you onto it. crew answers those
+requests itself, so the alert is telling you about something already handled.
+Turning it off is a single global setting, which would silence the same alert
+for your own session, so crew does not suggest it.
+
+## Keeping a director on its fleet
+
+Workers stop mid-task and wait. Only the director notices, and a director that
+ends its turn leaves them sitting there. Point your agent's stop hook at:
+
+```sh
+crew hook
+```
+
+It asks for the turn to continue while any worker is idle, needs input, has
+stalled or is gone, naming which, and gets out of the way otherwise. It never
+holds on for a worker that is merely working, and it lets a turn through after
+a few tries so a worker nothing can fix cannot pin the director indefinitely.
+
 ## First run in a repo
 
 Both Claude Code and Codex refuse to work in a directory they have not seen

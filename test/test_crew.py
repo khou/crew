@@ -1446,5 +1446,65 @@ class StaleWriteKeepsFieldsWrittenSinceTest(unittest.TestCase):
         self.assertEqual(self.crew.workers()["w1"].get("fp"), "abc")
 
 
+class StopHookTest(unittest.TestCase):
+    """A director must not end its turn while a worker is waiting on it.
+
+    Every worker run so far has needed re-prompting at least once, and only
+    the director notices. A Stop hook makes that structural instead of
+    something the director is trusted to remember.
+    """
+
+    def setUp(self):
+        self.crew = crew_module()
+        self.tmp = tempfile.mkdtemp(prefix="crew-hook-")
+        self.crew.STATE_PATH = os.path.join(self.tmp, "workers.json")
+        self.crew.EXIT_DIR = os.path.join(self.tmp, "exited")
+        self.crew.read_screen = lambda *a, **k: ""
+        self.sessions = {}
+        self.crew.hook_sessions = lambda: self.sessions
+        self.cfg = dict(self.crew.DEFAULTS)
+        self.cfg["agents"] = {"a": {}}
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def add(self, name, state):
+        self.crew.put_worker(name, {"agent": "a", "surface": name,
+                                    "workspace": "ws", "role": "r", "task": "t",
+                                    "repo": "", "cwd": "/nonexistent"},
+                             create=True)
+        self.sessions[name] = {"state": state, "pid": os.getpid()}
+
+    def hook(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.crew.cmd_hook(types.SimpleNamespace(), self.cfg)
+        return json.loads(out.getvalue())
+
+    def test_nothing_waiting_lets_the_turn_end(self):
+        self.assertEqual(self.hook(), {})
+
+    def test_a_worker_that_is_only_working_lets_the_turn_end(self):
+        # Blocking on running would trap the session for as long as the fleet
+        # is busy, which is most of the time.
+        self.add("w1", "running")
+        self.assertEqual(self.hook(), {})
+
+    def test_a_worker_waiting_on_the_director_blocks_the_turn(self):
+        self.add("w1", "idle")
+        decision = self.hook()
+        self.assertEqual(decision.get("decision"), "block")
+        self.assertIn("w1", decision.get("reason", ""),
+                      "the reason has to say who, or it is not actionable")
+
+    def test_a_wedged_worker_cannot_pin_the_director_forever(self):
+        # The escape hatch. Without it a worker nothing can fix would keep the
+        # director in its own turn indefinitely.
+        self.add("w1", "idle")
+        for _ in range(self.crew.HOOK_BLOCK_LIMIT):
+            self.assertEqual(self.hook().get("decision"), "block")
+        self.assertEqual(self.hook(), {}, "a wedged worker pinned the director")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
