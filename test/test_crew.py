@@ -1348,6 +1348,19 @@ class StopKeepsAWorkerWhoseTabWouldNotCloseTest(unittest.TestCase):
         self.assertIn("w1", self.crew.workers(),
                       "the worker was forgotten while its agent kept running")
 
+    def test_a_close_that_reports_success_is_not_taken_as_proof_it_worked(self):
+        # Measured live: close-surface returned 0, crew printed "stopped" and
+        # dropped the record, and both the tab and the agent survived. A later
+        # reap then removed that live agent's worktree and it re-rooted onto
+        # the primary checkout. Only the agent going proves the stop happened.
+        self.crew.cmux = lambda *a, timeout=60: (0, "")
+        self.sessions = {"s": {"state": "idle", "pid": os.getpid()}}
+        with mock.patch.object(self.crew.time, "sleep", lambda _s: None):
+            with self.assertRaises(SystemExit):
+                self.stop()
+        self.assertIn("w1", self.crew.workers(),
+                      "the worker was forgotten while its agent kept running")
+
     def test_a_worker_whose_tab_is_already_gone_is_still_forgotten(self):
         self.sessions = {}
         self.assertEqual(self.stop(), 0)

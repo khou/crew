@@ -1223,6 +1223,14 @@ def cmd_stop(args, cfg):
         if not pid or not pid_alive(pid):
             break
         time.sleep(0.5)
+    if pid and pid_alive(pid):
+        # A close that returns 0 is not proof the tab went. Measured: it
+        # reported success, the tab and the agent both survived, and the
+        # record was dropped anyway, which left a live agent nothing could
+        # reach and a worktree the next reap saw as abandoned.
+        die(f"{args.worker}'s agent is still running after closing its tab, so "
+            f"it is still a worker and has been kept. Close the tab yourself, "
+            "or kill the agent, then run this again.", 1)
     marker = exit_marker(w["surface"])
     if os.path.exists(marker):
         os.remove(marker)
