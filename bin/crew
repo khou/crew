@@ -689,6 +689,9 @@ def deliver(ws, surface, text, spec):
         return False, (f"the agent exited with status {status}; its tab is a "
                        "shell prompt and the message would have been run as a "
                        "command")
+    if any(re.search(p, read_screen(ws, surface, 40))
+           for p in (spec.get("blocked") or [])):
+        return False, "the session is showing a prompt only you can answer"
     one_line = " ".join(text.split())
     rc, out = cmux("send", "--workspace", ws, "--surface", surface, one_line)
     if rc != 0:
@@ -700,7 +703,7 @@ def deliver(ws, surface, text, spec):
         cmux("send-key", "--workspace", ws, "--surface", surface, "ctrl+u")
         return False, "the text did not appear in the agent's prompt, so it was " \
                       "not submitted. The session may have exited."
-    if any(re.search(p, screen) for p in spec["blocked"]):
+    if any(re.search(p, screen) for p in (spec.get("blocked") or [])):
         cmux("send-key", "--workspace", ws, "--surface", surface, "ctrl+u")
         return False, "the session is showing a prompt only you can answer"
     rc, out = cmux("send-key", "--workspace", ws, "--surface", surface, "enter")
@@ -821,16 +824,25 @@ def refresh(all_w, sessions, cfg):
         # reported as exhausted. An agent that has actually run out says so
         # last, where it stopped; if output keeps coming after the mention,
         # it is still running.
+        tail = "\n".join(screen.splitlines()[-8:]) if screen else ""
         last_lines = [l for l in screen.splitlines() if l.strip()][-2:]
-        if last_lines and any(re.search(p, "\n".join(last_lines), re.I)
-                               for p in patterns):
+        asking = list((spec.get("approval") or {}).get("prompt") or [])
+        showing_prompt = tail and any(re.search(p, tail) for p in asking)
+        # An agent showing a permission prompt is alive and asking, whatever
+        # words are in it. A worker whose own task is about rate limits puts
+        # them on screen, and being called exhausted also stops it being
+        # approved, so it wedges. Reproduced: a fixer working on quota
+        # detection asked to run a test named QuotaOnlyInTheTailTest.
+        if (last_lines and not showing_prompt and any(
+                re.search(p, "\n".join(last_lines), re.I) for p in patterns)):
             state = "quota"
 
         # A session can report needsInput and then finish the turn without
         # ever saying so, leaving a stale record that makes a director relay
         # a question nobody is asking. If nothing on screen is waiting for an
         # answer, it is not waiting.
-        if state == "needsInput" and screen and spec.get("approval"):
+        if state == "needsInput" and screen and (
+                spec.get("approval") or spec.get("blocked")):
             # Only for agents whose asking looks like something crew can
             # recognise. Without a known prompt shape there is no way to tell
             # a finished turn from a real question, and guessing idle would
@@ -900,8 +912,15 @@ def wait_loop(args, cfg):
                     # the prompt. Look again next time round rather than
                     # waking the director for something about to be handled.
                     continue
-            if state != w.get("seen") and state in interesting:
-                changed.append((name, state, w))
+            if state != w.get("seen"):
+                if state in interesting:
+                    changed.append((name, state, w))
+                else:
+                    # Not news itself, but the state changed, so re-arm: the
+                    # next return to an interesting state must be reported
+                    # even if it matches what was last seen before this dip.
+                    w["seen"] = state
+                    put_worker(name, w)
         if changed:
             # Printed before it is marked seen. An interrupt between the two
             # can then only repeat a change, never swallow one, and repeating

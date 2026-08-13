@@ -90,6 +90,20 @@ class DeathTest(unittest.TestCase):
         return " ".join(captured["cmd"])
 
 
+class DeliverRobustnessTest(unittest.TestCase):
+    def test_an_agent_without_blocked_patterns_does_not_crash_delivery(self):
+        # Agents are user-configurable, and the built-in ones all happen to
+        # define "blocked". Indexing it directly made delivery raise KeyError
+        # for any agent added in config without one.
+        crew = crew_module()
+        crew.read_screen = lambda ws, surface, lines=40: "an ordinary screen"
+        crew.exited = lambda surface: None
+        crew.cmux = lambda *a, **k: (0, "")
+        ok, why = crew.deliver("ws", "s", "hello", {})
+        self.assertFalse(ok)
+        self.assertNotIn("KeyError", why)
+
+
 class WorkerDirTest(unittest.TestCase):
     """Where a worker is working, when the worker is wrong about it."""
 
@@ -190,6 +204,44 @@ class StaleNeedsInputTest(unittest.TestCase):
     def test_a_login_screen_still_counts_as_needing_input(self):
         self.assertEqual(self.state("Press any key to log in"), "needsInput")
 
+    def test_stale_state_clears_for_an_agent_with_no_approval_block(self):
+        # codex and cursor define "blocked" but no "approval" prompt. The
+        # stale-clear must not require an approval block to exist.
+        self.crew.read_screen = lambda ws, surface, lines=40: "the work is done, at the prompt"
+        cfg = dict(self.crew.DEFAULTS)
+        cfg["agents"] = {"a": {"blocked": [r"Press any key to log in"]}}
+        w = {"agent": "a", "surface": "s", "workspace": "ws", "role": "r",
+             "task": "t", "fp": "x", "fp_at": time.time()}
+        sessions = {"s": {"state": "needsInput", "pid": os.getpid()}}
+        self.assertEqual(self.crew.refresh({"w": w}, sessions, cfg)["w"][0], "idle")
+
+
+class DeliverTest(unittest.TestCase):
+    """A blocked screen must never be typed at, not even a probe."""
+
+    def setUp(self):
+        self.crew = crew_module()
+        self.crew.exited = lambda surface: None
+
+    def test_a_blocked_screen_receives_no_keystrokes(self):
+        calls = []
+
+        def fake_cmux(*args, timeout=60):
+            calls.append(args)
+            if args[0] == "read-screen":
+                return 0, "hello there\nPress any key to log in"
+            return 0, ""
+
+        self.crew.cmux = fake_cmux
+        spec = {"blocked": [r"Press any key to log in"]}
+
+        ok, why = self.crew.deliver("ws", "s", "hello there", spec)
+
+        self.assertFalse(ok)
+        self.assertIn("only you can answer", why)
+        sent = [c for c in calls if c[0] in ("send", "send-key")]
+        self.assertEqual(sent, [], f"blocked screen was typed at: {sent}")
+
 
 class QuotaOnlyInTheTailTest(unittest.TestCase):
     """A worker writing about limits is not a worker that has hit one."""
@@ -213,6 +265,20 @@ class QuotaOnlyInTheTailTest(unittest.TestCase):
         body = "\n".join(["QUOTA_PATTERNS covers rate limit and quota wording"]
                          + [f"line {i}" for i in range(12)])
         self.assertEqual(self.state(body), "running")
+
+    def test_a_permission_prompt_mentioning_quota_is_not_exhaustion(self):
+        # Reproduced live: a fixer asked to run QuotaOnlyInTheTailTest and was
+        # marked exhausted, which also stopped it being approved, so it stuck.
+        self.crew.read_screen = lambda ws, surface, lines=40: (
+            "Do you want to proceed?\n 2. Yes, and do not ask again for: "
+            "python3 test/test_crew.py QuotaOnlyInTheTailTest")
+        cfg = dict(self.crew.DEFAULTS)
+        cfg["agents"] = {"a": {"approval": {"prompt": [r"Do you want to proceed"]}}}
+        w = {"agent": "a", "surface": "s", "workspace": "ws", "role": "r",
+             "task": "t", "fp": "x", "fp_at": time.time()}
+        sessions = {"s": {"state": "needsInput", "pid": os.getpid()}}
+        self.assertNotEqual(
+            self.crew.refresh({"w": w}, sessions, cfg)["w"][0], "quota")
 
     def test_a_limit_where_the_agent_actually_stopped_still_counts(self):
         screen = "\n".join([f"line {i}" for i in range(12)]
@@ -270,6 +336,39 @@ class WaitTest(unittest.TestCase):
         self.assertEqual(rc, 130)
         self.assertEqual(marked, [],
                          "the change was marked seen despite never being shown")
+
+    def test_idle_is_reported_again_after_a_run_in_between(self):
+        # idle -> running -> idle must be reported twice. A worker that goes
+        # back to work and finishes again is news each time, not just once.
+        crew = crew_module()
+        worker = {"role": "r", "task": "t", "surface": "s"}
+        crew.workers = lambda: {"w": worker}
+        crew.hook_sessions = lambda: {}
+        crew.put_worker = lambda name, w: None
+
+        current = ["idle"]
+        crew.refresh = lambda all_w, sessions, cfg: {"w": (current[0], worker)}
+
+        printed = []
+        crew.log = lambda msg="": printed.append(msg)
+
+        rc = crew.cmd_wait(types.SimpleNamespace(timeout=1, poll=0.01), {})
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(printed), 1, "first idle was not reported")
+        self.assertIn("idle", printed[0])
+
+        current[0] = "running"
+        rc = crew.cmd_wait(types.SimpleNamespace(timeout=0.05, poll=0.01), {})
+        self.assertEqual(rc, 0)
+
+        current[0] = "idle"
+        printed.clear()
+        rc = crew.cmd_wait(types.SimpleNamespace(timeout=1, poll=0.01), {})
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(printed), 1,
+                         "idle after a run in between was not reported")
+        self.assertIn("idle", printed[0],
+                       "expected a worker report, got: " + printed[0])
 
 
 class LaunchTest(unittest.TestCase):
