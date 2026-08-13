@@ -573,14 +573,17 @@ def main():
 
     bad_repos = []
     if args.repo:
-        repos = []
+        repos, seen = [], set()
         for r in args.repo:
             expanded = os.path.expanduser(r)
             if not os.path.isdir(expanded):
                 bad_repos.append(r)
                 log(f"warning: --repo {r} does not exist, skipping")
                 continue
-            repos.append(primary_checkout(expanded))
+            primary = primary_checkout(expanded)
+            if primary not in seen:
+                seen.add(primary)
+                repos.append(primary)
     else:
         repos = find_repos(resolve_roots(cfg))
     if not repos:
