@@ -280,6 +280,31 @@ class ReapTest(unittest.TestCase):
         with open(os.path.join(self.repo, "build/keep/shared.png")) as fh:
             self.assertEqual(fh.read(), "original", "existing file was overwritten")
 
+    def test_rescue_still_finds_primary_when_repo_is_a_linked_worktree(self):
+        # Found by review: passing --repo a linked worktree path used that
+        # path, not the primary checkout, both to look up the configured
+        # rescue list and as the copy destination. The configured rescue was
+        # missed and any rescue that did trigger would have landed inside the
+        # linked worktree instead of the primary.
+        self.write("build/keep/shared.png", "original")
+        self.config({"rescue": {os.path.realpath(self.repo): ["build/keep"]}})
+        editor = self.worktree("editor")
+        git(self.repo, "worktree", "lock", "--reason", "keep for this test", editor)
+        wt = self.worktree("art")
+        self.write("build/keep/unique.png", "paid for this", root=wt)
+
+        env = dict(os.environ, CREW_REAP_CONFIG=self.cfg_path)
+        subprocess.run([REAP, "--repo", editor, "--apply"],
+                       capture_output=True, text=True, env=env, cwd=self.tmp)
+
+        self.assertTrue(
+            os.path.exists(os.path.join(self.repo, "build/keep/unique.png")),
+            "rescue configured for the primary was missed when --repo named "
+            "a linked worktree")
+        self.assertFalse(
+            os.path.exists(os.path.join(editor, "build/keep/unique.png")),
+            "rescued file landed in the linked worktree instead of the primary")
+
     def test_repo_local_config_is_honoured(self):
         self.write(".crew.json", json.dumps({"rescue": ["build/keep"]}))
         wt = self.worktree("art2")
