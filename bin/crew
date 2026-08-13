@@ -689,7 +689,8 @@ def deliver(ws, surface, text, spec):
         return False, (f"the agent exited with status {status}; its tab is a "
                        "shell prompt and the message would have been run as a "
                        "command")
-    if any(re.search(p, read_screen(ws, surface, 40)) for p in spec["blocked"]):
+    if any(re.search(p, read_screen(ws, surface, 40))
+           for p in (spec.get("blocked") or [])):
         return False, "the session is showing a prompt only you can answer"
     one_line = " ".join(text.split())
     rc, out = cmux("send", "--workspace", ws, "--surface", surface, one_line)
@@ -702,7 +703,7 @@ def deliver(ws, surface, text, spec):
         cmux("send-key", "--workspace", ws, "--surface", surface, "ctrl+u")
         return False, "the text did not appear in the agent's prompt, so it was " \
                       "not submitted. The session may have exited."
-    if any(re.search(p, screen) for p in spec["blocked"]):
+    if any(re.search(p, screen) for p in (spec.get("blocked") or [])):
         cmux("send-key", "--workspace", ws, "--surface", surface, "ctrl+u")
         return False, "the session is showing a prompt only you can answer"
     rc, out = cmux("send-key", "--workspace", ws, "--surface", surface, "enter")

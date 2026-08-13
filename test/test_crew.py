@@ -90,6 +90,20 @@ class DeathTest(unittest.TestCase):
         return " ".join(captured["cmd"])
 
 
+class DeliverRobustnessTest(unittest.TestCase):
+    def test_an_agent_without_blocked_patterns_does_not_crash_delivery(self):
+        # Agents are user-configurable, and the built-in ones all happen to
+        # define "blocked". Indexing it directly made delivery raise KeyError
+        # for any agent added in config without one.
+        crew = crew_module()
+        crew.read_screen = lambda ws, surface, lines=40: "an ordinary screen"
+        crew.exited = lambda surface: None
+        crew.cmux = lambda *a, **k: (0, "")
+        ok, why = crew.deliver("ws", "s", "hello", {})
+        self.assertFalse(ok)
+        self.assertNotIn("KeyError", why)
+
+
 class WorkerDirTest(unittest.TestCase):
     """Where a worker is working, when the worker is wrong about it."""
 
