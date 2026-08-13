@@ -1211,14 +1211,22 @@ def cmd_merge(args, cfg):
                 "to merge.", 1)
         branch = w.get("branch")
         if where and os.path.isdir(where):
-            branch = worker_branch(where) or branch
-            rc, dirty = run(["git", "-C", where, "--no-optional-locks",
-                             "status", "--porcelain"])
-            if dirty:
-                die(f"{args.worker} has {len(dirty.splitlines())} uncommitted "
-                    "file(s), which are not on its branch yet. Commit them, or "
-                    "run crew reap, which commits them for you. Merge works "
-                    "either way, including after the worktree is gone.", 1)
+            rc, head = run(["git", "-C", where, "rev-parse",
+                            "--abbrev-ref", "HEAD"])
+            if rc == 0:
+                if head and head != "HEAD":
+                    branch = head
+                rc, dirty = run(["git", "-C", where, "--no-optional-locks",
+                                 "status", "--porcelain"])
+                if rc != 0:
+                    die(f"could not check {args.worker}'s worktree at "
+                        f"{where} for uncommitted changes: {dirty}", 1)
+                if dirty:
+                    die(f"{args.worker} has {len(dirty.splitlines())} "
+                        "uncommitted file(s), which are not on its branch "
+                        "yet. Commit them, or run crew reap, which commits "
+                        "them for you. Merge works either way, including "
+                        "after the worktree is gone.", 1)
         if not branch:
             die(f"{args.worker} has no branch recorded and no worktree left, "
                 "so there is nothing to merge.", 1)
