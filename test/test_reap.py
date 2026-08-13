@@ -145,6 +145,56 @@ class ReapTest(unittest.TestCase):
         self.assertEqual(git(self.repo, "show", "crew-rescued/on-main:leftovers.txt"),
                          "agent junk")
 
+    def test_a_clean_detached_worktree_keeps_its_commits(self):
+        # Found by review: the rescue only ran on the dirty path, so a
+        # detached worktree whose work was already committed was removed and
+        # its commits became unreachable.
+        wt = self.worktree("orphan-clean", detach=True)
+        self.write("done.txt", "committed work", root=wt)
+        git(wt, "add", "-A")
+        git(wt, "commit", "-qm", "work the agent committed itself")
+        sha = git(wt, "rev-parse", "HEAD")
+
+        self.reap("--apply")
+        self.assertFalse(os.path.exists(wt))
+        self.assertIn("crew-rescued/orphan-clean", self.branches(),
+                      "a clean detached worktree lost its commits")
+        self.assertEqual(git(self.repo, "rev-parse", "crew-rescued/orphan-clean"),
+                         sha)
+
+    def test_a_lock_set_by_a_person_is_obeyed(self):
+        # Found by review: any lock without a live pid was cleared and the
+        # worktree removed, which defeats the point of locking one.
+        wt = self.worktree("precious")
+        self.write("keep.env", "secrets", root=wt)
+        git(self.repo, "worktree", "lock", "--reason", "do not delete", wt)
+        out = self.reap("--apply")
+        self.assertTrue(os.path.isdir(wt), "a hand-locked worktree was removed")
+        self.assertIn("locked by hand", out)
+
+    def test_the_real_primary_is_safe_when_pointed_at_a_worktree(self):
+        # Found by review: the guard compared against whatever --repo was, so
+        # aiming it at a linked worktree made the actual checkout a candidate.
+        wt = self.worktree("linked")
+        # Uncommitted work in the primary, the way a person's checkout looks.
+        # Without it nothing is committed and the bug hides.
+        self.write("README.md", "work in progress, not committed")
+        before = git(self.repo, "rev-parse", "--abbrev-ref", "HEAD")
+
+        env = dict(os.environ, CREW_REAP_CONFIG=self.cfg_path)
+        p = subprocess.run([REAP, "--repo", wt, "--apply"],
+                           capture_output=True, text=True, env=env, cwd=self.tmp)
+
+        self.assertTrue(os.path.isdir(self.repo), "the primary checkout was removed")
+        self.assertNotIn("crew-rescued/repo", self.branches(),
+                         "the primary's uncommitted work was committed to a "
+                         "rescue branch")
+        self.assertEqual(git(self.repo, "rev-parse", "--abbrev-ref", "HEAD"), before,
+                         "the primary checkout was moved off its branch")
+        self.assertEqual(git(self.repo, "--no-optional-locks", "status",
+                             "--porcelain").count("README.md"), 1,
+                         "the primary's uncommitted change was taken away")
+
     def test_oversized_file_is_refused_and_worktree_kept(self):
         self.config({"max_file_mb": 1})
         wt = self.worktree("heavy")

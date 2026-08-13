@@ -53,6 +53,32 @@ Change any of it in `~/.config/crew/crew.json`.
 - A worker that **died, or never started**. State comes from the terminal, not
   from the worker reporting in, so a crash still shows up truthfully.
 
+## Keeping a fleet out of your way
+
+Workers open as tabs in a workspace of their own, one per director, never as
+tabs beside the session you are working in. A tab created in the pane you are
+looking at flashes to the front and back again, once per worker. One director
+can be running work across several repositories, so the fleet belongs to the
+director rather than to a repo.
+
+Two cmux preferences are worth setting. crew prints them at `crew install
+--quiet-cmux` and does not write them for you, because a tool that quietly
+edits your terminal's configuration is the same class of behaviour this is
+turning off:
+
+```json
+{ "app": { "reorderOnNotification": false } }
+```
+
+then `cmux reload-config`. Without it, workspaces are moved toward the top of
+the sidebar as notifications arrive, so a working fleet reshuffles your
+sidebar under you.
+
+Workers are also launched with their own agent's notifications turned off, so
+what reaches you comes from the director. That is the whole point: the
+director is escalated to, and escalates onward, so notifications should come
+from it and not from six workers at once.
+
 ## First run in a repo
 
 Both Claude Code and Codex refuse to work in a directory they have not seen
@@ -80,9 +106,22 @@ crew asks each agent for the nearest thing it has to that:
 | `full` | `--permission-mode bypassPermissions` | `--dangerously-bypass-approvals-and-sandbox` | `--force` |
 
 At `edit`, a worker changes files freely. It still stops before doing something
-its agent will not do unattended, usually running a shell command. That stop is
-not a failure. It shows up as `needsInput`, `crew show` prints the question, and
-the director puts it to you. crew never answers a permission prompt for you.
+its agent will not do unattended, usually running a shell command.
+
+Those routine stops are answered for you. A fleet that relays every "may I run
+ls" is worse than no fleet: one real worker on one task stopped seven times.
+`crew wait` and `crew status` approve them and tell the worker not to ask
+again. Set `"auto_approve": false` if you would rather see each one.
+
+What is never answered automatically is anything in an agent's blocked list: a
+login screen or a trust dialog. Those are decisions only you can make, and a
+keystroke at a login can start a browser sign-in and clear stored credentials.
+They surface as `needsInput`, `crew show` prints the question, and the director
+puts it to you.
+
+Recognising a routine prompt needs a pattern for that agent, and only Claude
+Code has one today. Codex and Cursor are configured to approve their own safe
+actions instead (`--approve-for-me`, `--auto-review`), so they rarely ask.
 
 **Setting your agent's own default does not replace this.** Worth knowing
 before you rely on it: with a user-level default of `auto` configured, a worker

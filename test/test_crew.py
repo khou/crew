@@ -191,6 +191,35 @@ class StaleNeedsInputTest(unittest.TestCase):
         self.assertEqual(self.state("Press any key to log in"), "needsInput")
 
 
+class QuotaOnlyInTheTailTest(unittest.TestCase):
+    """A worker writing about limits is not a worker that has hit one."""
+
+    def setUp(self):
+        self.crew = crew_module()
+        self.crew.put_worker = lambda name, w: None
+
+    def state(self, screen):
+        self.crew.read_screen = lambda ws, surface, lines=40: screen
+        cfg = dict(self.crew.DEFAULTS)
+        cfg["agents"] = {"a": {}}
+        w = {"agent": "a", "surface": "s", "workspace": "ws", "role": "r",
+             "task": "t", "fp": "x", "fp_at": time.time()}
+        sessions = {"s": {"state": "running", "pid": os.getpid()}}
+        return self.crew.refresh({"w": w}, sessions, cfg)["w"][0]
+
+    def test_a_review_discussing_rate_limits_is_not_an_exhausted_plan(self):
+        # A reviewer reading this very file wrote the words into its output and
+        # was reported as out of allowance, so the director stopped spawning.
+        body = "\n".join(["QUOTA_PATTERNS covers rate limit and quota wording"]
+                         + [f"line {i}" for i in range(12)])
+        self.assertEqual(self.state(body), "running")
+
+    def test_a_limit_where_the_agent_actually_stopped_still_counts(self):
+        screen = "\n".join([f"line {i}" for i in range(12)]
+                           + ["you have hit your usage limit"])
+        self.assertEqual(self.state(screen), "quota")
+
+
 class QuotaPatternTest(unittest.TestCase):
     def test_an_allowance_indicator_is_not_an_exhausted_plan(self):
         # Real status lines from healthy sessions. A pattern matching "0% left"

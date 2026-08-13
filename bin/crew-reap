@@ -267,6 +267,11 @@ def list_worktrees(repo):
             cur["prunable"] = True
     if cur:
         trees.append(cur)
+    if trees:
+        # git lists the main worktree first. Believe that rather than the path
+        # we were pointed at: pointed at a linked worktree, the real primary
+        # checkout would otherwise look like a candidate for removal.
+        trees[0]["primary"] = True
     return trees
 
 
@@ -353,7 +358,7 @@ def plan_worktree(repo, wt, cfg, live):
         d["reason"] = "directory is gone, git record is stale"
         return d
 
-    if os.path.realpath(path) == os.path.realpath(repo):
+    if wt.get("primary") or os.path.realpath(path) == os.path.realpath(repo):
         d["action"] = "skip"
         d["reason"] = "primary checkout"
         return d
@@ -364,15 +369,27 @@ def plan_worktree(repo, wt, cfg, live):
             d["reason"] = "in use by a running process"
             return d
 
-    if wt["locked"] and "pid " in wt["lock_reason"]:
-        try:
-            pid = wt["lock_reason"].split("pid ", 1)[1].split()[0]
-            if pid_alive(pid):
-                d["action"] = "skip"
-                d["reason"] = f"locked by live pid {pid}"
-                return d
-        except IndexError:
-            pass
+    if wt["locked"]:
+        # A lock naming a live process is an agent still using it. A lock
+        # naming a dead one is that agent's leftovers, safe to clear. Any
+        # other lock was put there by a person, and removing a worktree
+        # someone deliberately locked is the opposite of what they asked for.
+        pid = None
+        if "pid " in wt["lock_reason"]:
+            try:
+                pid = wt["lock_reason"].split("pid ", 1)[1].split()[0]
+            except IndexError:
+                pid = None
+        if pid and pid_alive(pid):
+            d["action"] = "skip"
+            d["reason"] = f"locked by live pid {pid}"
+            return d
+        if not pid:
+            d["action"] = "skip"
+            d["reason"] = ("locked by hand"
+                           + (f": {wt['lock_reason']}" if wt["lock_reason"] else "")
+                           + ". Unlock it yourself if you want it removed.")
+            return d
 
     age_min = (time.time() - gitdir_mtime(repo, path)) / 60.0
     if age_min < cfg["idle_minutes"]:
@@ -456,15 +473,21 @@ def apply_plan(d):
         ], cwd=path)
         if rc != 0:
             return False, f"commit failed: {out}"
-        # A detached HEAD commit is unreachable the moment the worktree goes.
-        if d["detached"]:
-            rc, sha = run(["git", "rev-parse", "HEAD"], cwd=path)
+
+    # A detached HEAD is unreachable the moment its worktree goes, whether or
+    # not there was anything uncommitted. A clean detached worktree took the
+    # straight removal path and lost its commits.
+    if d.get("detached"):
+        rc, sha = run(["git", "rev-parse", "HEAD"], cwd=path)
+        if rc == 0 and sha:
             name = "crew-rescued/" + os.path.basename(path)
             rc2, out2 = run(["git", "branch", name, sha], cwd=repo)
-            if rc2 != 0:
-                return False, f"could not save detached commit to a branch: {out2}"
+            if rc2 != 0 and "already exists" not in out2:
+                return False, f"could not save detached commits to a branch: {out2}"
 
     if d["locked"]:
+        # Only ever an agent's own stale lock: a lock set by a person is
+        # skipped before we get here.
         run(["git", "worktree", "unlock", path], cwd=repo)
 
     rc, out = run(["git", "worktree", "remove", path], cwd=repo)

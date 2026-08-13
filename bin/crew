@@ -363,7 +363,11 @@ def prune_orphan_flags(argv, spec):
 # --- worker state ---------------------------------------------------------
 
 def workers():
-    return load_json(STATE_PATH, {})
+    """The workers. Keys beginning with an underscore are crew's own notes,
+    such as which workspace this director's fleet lives in, and are not
+    workers."""
+    return {k: v for k, v in load_json(STATE_PATH, {}).items()
+            if not k.startswith("_")}
 
 
 def put_worker(name, data):
@@ -493,6 +497,10 @@ def cmd_spawn(args, cfg):
     else:
         cwd = repo  # the agent makes its own and moves itself there
 
+    # Workers are tabs in the director's own pane, created with --focus false
+    # so nothing moves. crew never changes focus or selection, in either
+    # direction: it must not switch you to a worker, and it must not drag you
+    # back either, because you may have deliberately gone to look at one.
     ws, pane = caller_context()
     surface = new_tab(ws, pane, cwd)
     title = f"{args.role} · {role['agent']} · {args.task[:40]}"
@@ -537,6 +545,15 @@ def cmd_spawn(args, cfg):
 
 def slug(text):
     return re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-") or "task"
+
+
+def pane_surfaces(ws, pane):
+    rc, out = cmux("list-pane-surfaces", "--workspace", ws, "--pane", pane,
+                   "--id-format", "both")
+    if rc != 0:
+        return []
+    return re.findall(r"[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}",
+                      out)
 
 
 def new_tab(ws, pane, cwd):
@@ -798,14 +815,23 @@ def refresh(all_w, sessions, cfg):
         if state not in ("gone",):
             screen = read_screen(w["workspace"], w["surface"], 40)
 
-        if screen and any(re.search(p, screen, re.I) for p in patterns):
+        # Only the tail. A worker whose work is about rate limits will write
+        # the words "rate limit" and "quota" into its output, and a review of
+        # this very file did exactly that and was reported as exhausted. An
+        # agent that has actually run out says so last, where it stopped.
+        tail = "\n".join(screen.splitlines()[-8:]) if screen else ""
+        if tail and any(re.search(p, tail, re.I) for p in patterns):
             state = "quota"
 
         # A session can report needsInput and then finish the turn without
         # ever saying so, leaving a stale record that makes a director relay
         # a question nobody is asking. If nothing on screen is waiting for an
         # answer, it is not waiting.
-        if state == "needsInput" and screen:
+        if state == "needsInput" and screen and spec.get("approval"):
+            # Only for agents whose asking looks like something crew can
+            # recognise. Without a known prompt shape there is no way to tell
+            # a finished turn from a real question, and guessing idle would
+            # hide a worker that is genuinely waiting.
             asking = list((spec.get("approval") or {}).get("prompt") or [])
             asking += list(spec.get("blocked") or [])
             if not any(re.search(p, screen) for p in asking):
@@ -930,6 +956,10 @@ def cmd_install(args, cfg):
         os.symlink(source, link)
         log(f"linked {link} -> {source}")
 
+    if args.quiet_cmux:
+        log("")
+        log(cmux_quiet_hint())
+
     on_path = target in os.environ.get("PATH", "").split(":")
     log("")
     if on_path:
@@ -939,6 +969,22 @@ def cmd_install(args, cfg):
         log(f"{target} is NOT on your PATH, so `crew` will not be found. "
             f"Add it:\n  export PATH=\"{target}:$PATH\"")
     return 0 if on_path else 1
+
+
+def cmux_quiet_hint():
+    """What to change in cmux so a fleet stays out of the way.
+
+    Printed rather than written. crew does not edit a config it does not own,
+    and a tool quietly reordering someone's terminal is exactly the behaviour
+    being turned off here.
+    """
+    return (
+        "To keep a fleet from disturbing you, in ~/.config/cmux/cmux.json:\n"
+        "  \"app\": { \"reorderOnNotification\": false }\n"
+        "then run: cmux reload-config\n"
+        "That stops workspaces being reshuffled as workers come and go. crew "
+        "already opens workers in a workspace of their own, so they never "
+        "change the view you are working in.")
 
 
 def worker_dir(name, w, sessions):
@@ -1197,6 +1243,15 @@ def cmd_reap(args, cfg):
 
 
 def main():
+    # reap forwards everything to crew-reap untouched. Handled before argparse
+    # so its flags stay crew-reap's: argparse rejects a leading --apply as an
+    # unknown option of crew's own, which made the documented cleanup command
+    # in docs/DIRECTOR.md fail outright.
+    if len(sys.argv) > 1 and sys.argv[1] == "reap":
+        reaper = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "crew-reap")
+        os.execv(reaper, [reaper, *sys.argv[2:]])
+
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1206,6 +1261,9 @@ def main():
     ins.add_argument("--uninstall", action="store_true")
     ins.add_argument("--force", action="store_true",
                      help="replace an existing file of the same name")
+    ins.add_argument("--quiet-cmux", action="store_true",
+                     help="print the cmux settings that keep a fleet out of "
+                          "your way")
 
     sub.add_parser("doctor", help="check every agent can start")
 
