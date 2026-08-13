@@ -494,8 +494,15 @@ def apply_plan(d):
         if rc == 0 and sha:
             name = "crew-rescued/" + os.path.basename(path)
             rc2, out2 = run(["git", "branch", name, sha], cwd=repo)
-            if rc2 != 0 and "already exists" not in out2:
-                return False, f"could not save detached commits to a branch: {out2}"
+            if rc2 != 0:
+                if "already exists" not in out2:
+                    return False, f"could not save detached commits to a branch: {out2}"
+                rc3, existing_sha = run(["git", "rev-parse", name], cwd=repo)
+                if rc3 != 0 or existing_sha != sha:
+                    return False, (
+                        f"rescue branch {name} already exists and points "
+                        f"elsewhere, worktree left in place: {out2}"
+                    )
 
     if d["locked"]:
         # Only ever an agent's own stale lock: a lock set by a person is
