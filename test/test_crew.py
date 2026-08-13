@@ -261,6 +261,70 @@ class MergeSelfTest(unittest.TestCase):
                          "no merge commit should have been created")
 
 
+class MergeStaleCwdTest(unittest.TestCase):
+    """A worktree's slot in the session store can outlive the worktree.
+
+    `crew reap` removes the worktree directory, but the hook session that
+    reported it as the worker's cwd is not always cleaned up in lockstep,
+    and some agents leave a leftover directory behind that is no longer a
+    git repository at all. Merge must not read a failed `git status` in
+    that directory as uncommitted files.
+    """
+
+    def setUp(self):
+        self.crew = crew_module()
+        self.tmp = tempfile.mkdtemp(prefix="crew-stalecwd-")
+        self.repo = os.path.join(self.tmp, "repo")
+        os.makedirs(self.repo)
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=self.repo,
+                       capture_output=True)
+        with open(os.path.join(self.repo, "f.txt"), "w") as fh:
+            fh.write("x")
+        subprocess.run(["git", "add", "-A"], cwd=self.repo, capture_output=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "-qm", "i"], cwd=self.repo, capture_output=True)
+        subprocess.run(["git", "branch", "w1"], cwd=self.repo, capture_output=True)
+        subprocess.run(["git", "-C", self.repo, "checkout", "-q", "w1"],
+                       capture_output=True)
+        with open(os.path.join(self.repo, "f.txt"), "w") as fh:
+            fh.write("y")
+        subprocess.run(["git", "add", "-A"], cwd=self.repo, capture_output=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "-qm", "worker change"], cwd=self.repo,
+                       capture_output=True)
+        subprocess.run(["git", "-C", self.repo, "checkout", "-q", "main"],
+                       capture_output=True)
+
+        # No worktree was ever created for this worker, so worker_dir falls
+        # through to the session's reported cwd, which exists on disk but
+        # was never a git repo (or has since been reaped).
+        self.stale = os.path.join(self.tmp, "stale-session-cwd")
+        os.makedirs(self.stale)
+
+        self.crew.hook_sessions = lambda: {"s": {"cwd": self.stale}}
+        self.crew.refresh = lambda all_w, sessions, cfg: {
+            name: ("idle", ww) for name, ww in all_w.items()}
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_merge_succeeds_despite_a_stale_non_repo_session_cwd(self):
+        w = {"repo": self.repo, "surface": "s", "branch": "w1",
+             "task": "stale cwd merge"}
+        self.crew.workers = lambda: {"w1": w}
+        args = types.SimpleNamespace(worker="w1", force=False)
+        cwd = os.getcwd()
+        os.chdir(self.repo)
+        try:
+            rc = self.crew.cmd_merge(args, {"agents": {}})
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(rc, 0)
+        with open(os.path.join(self.repo, "f.txt")) as fh:
+            self.assertEqual(fh.read(), "y",
+                             "the worker's branch change was not merged in")
+
+
 class ScreenLifecycleTest(unittest.TestCase):
     """Agents whose reported lifecycle never changes."""
 
