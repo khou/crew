@@ -285,6 +285,15 @@ class QuotaOnlyInTheTailTest(unittest.TestCase):
                            + ["you have hit your usage limit"])
         self.assertEqual(self.state(screen), "quota")
 
+    def test_a_mention_mid_tail_with_more_output_after_it_is_not_a_stop(self):
+        # The worker warns about rate limits while still working, then keeps
+        # producing unrelated output afterward. It is still running: only
+        # the true end of the screen says whether it actually stopped there.
+        screen = "\n".join([f"line {i}" for i in range(4)]
+                           + ["note: watch for rate limit errors on retries"]
+                           + [f"line {i}" for i in range(4, 8)])
+        self.assertEqual(self.state(screen), "running")
+
 
 class QuotaPatternTest(unittest.TestCase):
     def test_an_allowance_indicator_is_not_an_exhausted_plan(self):
