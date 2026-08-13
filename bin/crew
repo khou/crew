@@ -1260,10 +1260,6 @@ def cmd_merge(args, cfg):
     if w:
         repo = w.get("repo") or repo
         sessions = hook_sessions()
-        state = current_state(args.worker, w, sessions, cfg)
-        if state == "running" and not args.force:
-            die(f"{args.worker} is still working. Merging now takes a "
-                "half-written state. Wait for idle, or pass --force.", 1)
 
         # The branch, not the worktree, is what gets merged. A worker whose
         # worktree has already been reaped is still perfectly mergeable, and
@@ -1275,23 +1271,49 @@ def cmd_merge(args, cfg):
                 "checkout you are merging into. There is no separate branch "
                 "to merge.", 1)
         branch = w.get("branch")
+        head_read = False
         if where and os.path.isdir(where):
             rc, head = run(["git", "-C", where, "rev-parse",
                             "--abbrev-ref", "HEAD"])
+            head_read = rc == 0
+            if head_read and head and head != "HEAD":
+                branch = head
+
+        # The worker wins the name when the name means one thing, which is
+        # the ordinary case: a worker's branch is usually named after it.
+        # When the name means two different things there is no way to say
+        # which, and picking one silently merges work nobody asked for.
+        # Asked before the checks below, because "it is still working"
+        # answers the wrong question when the branch is what was meant.
+        if branch and branch != args.worker:
+            rc, _ = run(["git", "-C", repo, "rev-parse", "-q", "--verify",
+                         f"refs/heads/{args.worker}"])
             if rc == 0:
-                if head and head != "HEAD":
-                    branch = head
-                rc, dirty = run(["git", "-C", where, "--no-optional-locks",
-                                 "status", "--porcelain"])
-                if rc != 0:
-                    die(f"could not check {args.worker}'s worktree at "
-                        f"{where} for uncommitted changes: {dirty}", 1)
-                if dirty:
-                    die(f"{args.worker} has {len(dirty.splitlines())} "
-                        "uncommitted file(s), which are not on its branch "
-                        "yet. Commit them, or run crew reap, which commits "
-                        "them for you. Merge works either way, including "
-                        "after the worktree is gone.", 1)
+                die(f"{args.worker} is both a live worker, whose work is on "
+                    f"{branch}, and a branch called {args.worker} in {repo}. "
+                    "crew merge has no way to say which one you mean, so it "
+                    "merged neither.\n"
+                    f"  the worker's work:  crew merge {branch}\n"
+                    f"  the branch:         git -C {repo} merge --no-ff "
+                    f"{args.worker}", 1)
+
+        state = current_state(args.worker, w, sessions, cfg)
+        if state == "running" and not args.force:
+            die(f"{args.worker} is still working. Merging now takes a "
+                "half-written state. Wait for idle, or pass --force.", 1)
+
+        if head_read:
+            rc, dirty = run(["git", "-C", where, "--no-optional-locks",
+                             "status", "--porcelain"])
+            if rc != 0:
+                die(f"could not check {args.worker}'s worktree at "
+                    f"{where} for uncommitted changes: {dirty}", 1)
+            if dirty:
+                die(f"{args.worker} has {len(dirty.splitlines())} "
+                    "uncommitted file(s), which are not on its branch "
+                    "yet. Commit them, or run crew reap, which commits "
+                    "them for you. Merge works either way, including "
+                    "after the worktree is gone.", 1)
         if not branch:
             die(f"{args.worker} has no branch recorded and no worktree left, "
                 "so there is nothing to merge.", 1)
@@ -1530,7 +1552,8 @@ def main():
                     help="stop it even if it is mid-turn")
 
     mg = sub.add_parser("merge", help="merge a worker's branch into this repo")
-    mg.add_argument("worker", help="a worker name, or a branch if it is gone")
+    mg.add_argument("worker", help="a worker name, or a branch if it is gone; "
+                                   "a name that is both is refused")
     mg.add_argument("--force", action="store_true",
                     help="merge even if the worker is still working")
 
