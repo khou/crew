@@ -6,6 +6,7 @@ state, and cleans up after them. Workers are ordinary interactive sessions in
 ordinary terminal tabs, signed in as you, so they use your subscription rather
 than an API key.
 
+  crew install             put crew and crew-reap on your PATH
   crew doctor              check every configured agent can actually start
   crew spawn <role> <task> open a worker tab and wait until it is ready
   crew status              what every worker is doing
@@ -120,6 +121,11 @@ AGENTS = {
         # account, which moves the work onto usage billing instead of the
         # plan. Workers are meant to spend the subscription.
         "env_unset": ["CURSOR_API_KEY"],
+        # Measured: this agent's hook records the session once and never
+        # updates it, so it reads as running forever and wait would never
+        # wake for it. Fall back to the screen, which is where its state is
+        # actually visible.
+        "lifecycle": "screen",
         "ready": [r"Plan, search, build anything", r"Add a follow-up"],
         "blocked": [r"Press any key to log in", r"Workspace Trust Required",
                     r"agent login"],
@@ -148,6 +154,9 @@ DEFAULTS = {
     # claims to be working, is stuck rather than thinking. Fractions are
     # allowed. 0 disables the check.
     "stall_minutes": 15,
+    # For agents whose reported lifecycle is unreliable, how long a screen must
+    # hold still before the worker counts as idle rather than working.
+    "screen_idle_seconds": 20,
 }
 
 # Signs a session has run out of plan allowance. Deliberately broad, because
@@ -162,6 +171,12 @@ QUOTA_PATTERNS = [
     r"out of (credits|tokens)", r"upgrade your plan",
     r"resets? (at|in) ", r"too many requests",
 ]
+
+# A screen has to hold still across this many consecutive polls, and the
+# session be at least this old, before an absence of change counts as ready.
+# One identical pair is not enough: a slow welcome screen pauses mid-draw.
+STABLE_READS = 2
+SETTLE_FLOOR = 6
 
 
 def log(msg=""):
@@ -573,8 +588,10 @@ def await_ready(ws, surface, spec, timeout):
     blocked = [re.compile(p) for p in spec["blocked"]]
     quota = [re.compile(p, re.I) for p in (spec.get("exhausted") or QUOTA_PATTERNS)]
     deadline = time.time() + timeout
+    started = time.time()
     screen = ""
     previous = None
+    stable = 0
     while time.time() < deadline:
         screen = read_screen(ws, surface, 40)
         for pat in quota:
@@ -592,8 +609,20 @@ def await_ready(ws, surface, spec, timeout):
             return "exited", "the agent exited: " + " | ".join(last)
         if any(p.search(screen) for p in ready):
             return "ready", ""
-        if screen.strip() and screen == previous and surface in hook_sessions():
-            return "ready", ""
+        # Nothing left to draw is the only readiness signal that holds across
+        # agents. The patterns above are a fast path, but they are wording,
+        # and wording changes with permission mode and between releases. A
+        # hook session is no good either: some agents register one only once
+        # they do something, so a session sitting at its prompt has none.
+        #
+        # Blocked, quota and exited screens are settled too, which is why they
+        # are checked first and return before this.
+        if screen.strip() and screen == previous:
+            stable += 1
+            if stable >= STABLE_READS and time.time() - started >= SETTLE_FLOOR:
+                return "ready", ""
+        else:
+            stable = 0
         previous = screen
         time.sleep(2)
     tail = [l for l in screen.splitlines() if l.strip()][-2:]
@@ -640,14 +669,15 @@ def cmd_status(args, cfg):
     log(f"{'worker':28} {'role':10} {'agent':8} {'state':10} where")
     seen = refresh(all_w, sessions, cfg)
     for name, (state, w) in sorted(seen.items()):
-        s = sessions.get(w["surface"], {})
-        # The agent may have moved itself into a worktree it created, so
-        # trust what it reports over what crew asked for.
-        actual = s.get("cwd") or w.get("cwd", "")
+        actual = worker_dir(name, w, sessions)
         try:
             where = os.path.relpath(actual, w.get("repo", "")) or "."
         except ValueError:
             where = actual
+        if where.startswith(".."):
+            # Outside the repo, so a relative path is a wall of dots. Some
+            # agents put their worktrees under the home directory.
+            where = actual.replace(HOME, "~")
         log(f"{name:28} {w['role']:10} {w['agent']:8} {state:10} {where}")
     for label, note in (
         ("needsInput", "waiting on you"),
@@ -736,9 +766,14 @@ def refresh(all_w, sessions, cfg):
                 w["fp"] = fp
                 w["fp_at"] = now
                 put_worker(name, w)
-            elif (state == "running" and stall_seconds
-                  and now - w.get("fp_at", now) > stall_seconds):
-                state = "stalled"
+            else:
+                quiet = now - w.get("fp_at", now)
+                if (spec.get("lifecycle") == "screen" and state == "running"
+                        and quiet > cfg["screen_idle_seconds"]):
+                    state = "idle"
+                elif (state == "running" and stall_seconds
+                      and quiet > stall_seconds):
+                    state = "stalled"
         out[name] = (state, w)
     return out
 
@@ -793,14 +828,73 @@ def wait_loop(args, cfg):
         time.sleep(args.poll)
 
 
-def worker_dir(w, sessions):
+def cmd_install(args, cfg):
+    """Put crew and crew-reap on PATH.
+
+    Symlinks rather than copies, so pulling the repo updates the installed
+    commands and there is never a stale second copy to be confused by.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    target = os.path.expanduser(args.prefix)
+    tools = ["crew", "crew-reap"]
+
+    if args.uninstall:
+        for name in tools:
+            link = os.path.join(target, name)
+            if os.path.islink(link) and os.path.realpath(link).startswith(here):
+                os.remove(link)
+                log(f"removed {link}")
+            elif os.path.exists(link):
+                log(f"left {link} alone, it is not a link to this checkout")
+        return 0
+
+    if not os.path.isdir(target):
+        die(f"{target} does not exist. Make it, or pass --prefix to a "
+            "directory on your PATH.")
+    for name in tools:
+        source = os.path.join(here, name)
+        link = os.path.join(target, name)
+        if os.path.lexists(link):
+            if os.path.realpath(link) == os.path.realpath(source):
+                log(f"{link} already points here")
+                continue
+            if not args.force:
+                die(f"{link} exists and is not this checkout. Pass --force to "
+                    "replace it.")
+            os.remove(link)
+        os.symlink(source, link)
+        log(f"linked {link} -> {source}")
+
+    on_path = target in os.environ.get("PATH", "").split(":")
+    log("")
+    if on_path:
+        log("Both are on your PATH. A director session can now follow "
+            "docs/DIRECTOR.md as written.")
+    else:
+        log(f"{target} is NOT on your PATH, so `crew` will not be found. "
+            f"Add it:\n  export PATH=\"{target}:$PATH\"")
+    return 0 if on_path else 1
+
+
+def worker_dir(name, w, sessions):
     """Where a worker is actually working.
 
-    An agent that makes its own worktree moves itself there, so what crew
-    asked for is not necessarily where the work is. The session reports the
-    truth.
+    Ask git first. An agent that makes its own worktree puts it wherever it
+    likes, and not every agent reports its own directory correctly: one of
+    them records the cwd of its config directory instead, which would send
+    merge and stop at entirely the wrong tree. Git knows the truth for any
+    agent, because the worktree is named after the worker.
     """
-    return sessions.get(w["surface"], {}).get("cwd") or w.get("cwd", "")
+    repo = w.get("repo") or ""
+    if repo:
+        rc, out = run(["git", "-C", repo, "worktree", "list", "--porcelain"])
+        if rc == 0:
+            for line in out.splitlines():
+                if line.startswith("worktree "):
+                    path = line.split(" ", 1)[1]
+                    if os.path.basename(path) == name:
+                        return path
+    return sessions.get(w.get("surface"), {}).get("cwd") or w.get("cwd", "")
 
 
 def worker_branch(path):
@@ -824,7 +918,7 @@ def cmd_stop(args, cfg):
         die(f"{args.worker} is mid-turn. Wait for it, or pass --force to stop "
             "it anyway. Anything it has written is kept either way.", 1)
 
-    where = worker_dir(w, sessions)
+    where = worker_dir(args.worker, w, sessions)
     cmux("close-surface", "--workspace", w["workspace"], "--surface", w["surface"])
     marker = exit_marker(w["surface"])
     if os.path.exists(marker):
@@ -855,7 +949,7 @@ def cmd_merge(args, cfg):
         die(f"{args.worker} is still working. Merging now takes a half-written "
             "state. Wait for idle, or pass --force.", 1)
 
-    where = worker_dir(w, sessions)
+    where = worker_dir(args.worker, w, sessions)
     if not where or not os.path.isdir(where):
         die(f"{args.worker} has no worktree left to merge from", 1)
     branch = worker_branch(where)
@@ -957,6 +1051,12 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
+    ins = sub.add_parser("install", help="put crew and crew-reap on PATH")
+    ins.add_argument("--prefix", default="~/.local/bin")
+    ins.add_argument("--uninstall", action="store_true")
+    ins.add_argument("--force", action="store_true",
+                     help="replace an existing file of the same name")
+
     sub.add_parser("doctor", help="check every agent can start")
 
     sp = sub.add_parser("spawn", help="open a worker tab and wait for it")
@@ -998,14 +1098,15 @@ def main():
 
     args = ap.parse_args()
 
-    if args.cmd != "reap":
+    if args.cmd not in ("reap", "install"):
         missing = [b for b in REQUIRED_BINARIES if shutil.which(b) is None]
         if missing:
             die(f"crew needs {' and '.join(missing)} on PATH")
 
     cfg = config()
     return {
-        "doctor": cmd_doctor, "spawn": cmd_spawn, "status": cmd_status,
+        "install": cmd_install, "doctor": cmd_doctor, "spawn": cmd_spawn,
+        "status": cmd_status,
         "wait": cmd_wait, "say": cmd_say, "show": cmd_show, "stop": cmd_stop,
         "merge": cmd_merge, "reap": cmd_reap,
     }[args.cmd](args, cfg)

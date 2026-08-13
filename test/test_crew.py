@@ -14,6 +14,8 @@ import importlib.util
 import json
 import os
 import shutil
+import subprocess
+import time
 import tempfile
 import types
 import unittest
@@ -85,6 +87,77 @@ class DeathTest(unittest.TestCase):
         self.crew.cmux = lambda *a, **k: (captured.update(cmd=a), (0, ""))[1]
         self.crew.launch("ws", surface, "/tmp", ["/bin/true"], {})
         return " ".join(captured["cmd"])
+
+
+class WorkerDirTest(unittest.TestCase):
+    """Where a worker is working, when the worker is wrong about it."""
+
+    def setUp(self):
+        self.crew = crew_module()
+        self.tmp = tempfile.mkdtemp(prefix="crew-dir-")
+        self.repo = os.path.join(self.tmp, "repo")
+        os.makedirs(self.repo)
+        for cmd in (["init", "-q", "-b", "main"], ["add", "-A"]):
+            subprocess.run(["git", *cmd], cwd=self.repo, capture_output=True)
+        with open(os.path.join(self.repo, "f.txt"), "w") as fh:
+            fh.write("x")
+        subprocess.run(["git", "add", "-A"], cwd=self.repo, capture_output=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "-qm", "i"], cwd=self.repo, capture_output=True)
+        # A worktree well outside the repo, the way some agents place theirs.
+        self.wt = os.path.join(self.tmp, "elsewhere", "w1")
+        subprocess.run(["git", "worktree", "add", "-q", self.wt, "-b", "w1"],
+                       cwd=self.repo, capture_output=True)
+
+    def tearDown(self):
+        subprocess.run(["git", "worktree", "remove", "--force", self.wt],
+                       cwd=self.repo, capture_output=True)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_git_is_believed_over_a_session_reporting_the_wrong_directory(self):
+        # One agent records its config directory as the session cwd. Trusting
+        # that would send merge and stop at the wrong tree entirely.
+        w = {"repo": self.repo, "cwd": "/also/wrong"}
+        sessions = {"s": {"cwd": "/completely/wrong"}}
+        self.assertEqual(os.path.realpath(self.crew.worker_dir("w1", w, sessions)),
+                         os.path.realpath(self.wt))
+
+    def test_the_session_is_used_when_git_knows_no_such_worktree(self):
+        w = {"repo": self.repo, "cwd": "/fallback"}
+        sessions = {"s": {"cwd": "/from/session"}}
+        got = self.crew.worker_dir("nosuchworker", w, sessions)
+        self.assertEqual(got, "/fallback")
+
+
+class ScreenLifecycleTest(unittest.TestCase):
+    """Agents whose reported lifecycle never changes."""
+
+    def setUp(self):
+        self.crew = crew_module()
+        self.crew.read_screen = lambda ws, surface, lines=40: "a still screen"
+        self.crew.put_worker = lambda name, w: None
+
+    def refresh(self, spec, fp_at_offset):
+        cfg = dict(self.crew.DEFAULTS)
+        cfg["agents"] = {"a": spec}
+        cfg["screen_idle_seconds"] = 20
+        cfg["stall_minutes"] = 15
+        w = {"agent": "a", "surface": "s", "workspace": "ws", "role": "r", "task": "t",
+             "fp": self.crew.screen_fingerprint("a still screen"),
+             "fp_at": time.time() - fp_at_offset}
+        sessions = {"s": {"state": "running", "pid": os.getpid()}}
+        return self.crew.refresh({"w": w}, sessions, cfg)["w"][0]
+
+    def test_a_still_screen_means_idle_when_the_lifecycle_cannot_be_trusted(self):
+        # Without this the agent reads as running forever and wait never wakes.
+        self.assertEqual(self.refresh({"lifecycle": "screen"}, 30), "idle")
+
+    def test_it_is_still_working_until_the_screen_has_been_quiet_long_enough(self):
+        self.assertEqual(self.refresh({"lifecycle": "screen"}, 5), "running")
+
+    def test_an_agent_with_a_trustworthy_lifecycle_is_left_alone(self):
+        # A quiet screen is not idleness for these; that is what stalled is for.
+        self.assertEqual(self.refresh({}, 30), "running")
 
 
 class WaitTest(unittest.TestCase):
