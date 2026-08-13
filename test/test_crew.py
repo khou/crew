@@ -680,5 +680,74 @@ class SayToAWorkerWithARemovedAgentTest(unittest.TestCase):
         self.assertEqual(delivered["spec"], {})
 
 
+class InstallUninstallTest(unittest.TestCase):
+    """--uninstall must remove both links when run through the installed symlink.
+
+    cmd_install decides ownership from the path of the running script. Invoked
+    directly that is the checkout; invoked through the installed symlink (as it
+    always is in real use) it must still resolve back to the checkout, or the
+    ownership check fails and every link is left behind.
+    """
+
+    def setUp(self):
+        self.prefix = tempfile.mkdtemp(prefix="crew-install-")
+
+    def tearDown(self):
+        shutil.rmtree(self.prefix, ignore_errors=True)
+
+    def test_uninstall_through_the_installed_symlink_removes_both_links(self):
+        subprocess.run(
+            [CREW, "install", "--prefix", self.prefix],
+            capture_output=True, text=True)
+        crew_link = os.path.join(self.prefix, "crew")
+        reap_link = os.path.join(self.prefix, "crew-reap")
+        self.assertTrue(os.path.islink(crew_link))
+        self.assertTrue(os.path.islink(reap_link))
+
+        subprocess.run(
+            [crew_link, "install", "--uninstall", "--prefix", self.prefix],
+            check=True, capture_output=True, text=True)
+
+        self.assertFalse(os.path.exists(crew_link),
+                          "crew link should have been removed")
+        self.assertFalse(os.path.exists(reap_link),
+                          "crew-reap link should have been removed")
+
+    def test_uninstall_leaves_a_symlink_to_a_sibling_checkout_alone(self):
+        # A sibling checkout whose bin dir string-extends this one's ("bin" vs
+        # "bin-sibling") used to fool a startswith ownership check even though
+        # it is a different checkout entirely.
+        checkout = tempfile.mkdtemp(prefix="crew-checkout-")
+        here = os.path.join(checkout, "bin")
+        os.makedirs(here)
+        shutil.copy(CREW, os.path.join(here, "crew"))
+        with open(os.path.join(here, "crew-reap"), "w") as fh:
+            fh.write("#!/bin/sh\n")
+
+        sibling = os.path.join(checkout, "bin-sibling")
+        os.makedirs(sibling)
+        with open(os.path.join(sibling, "crew-reap"), "w") as fh:
+            fh.write("#!/bin/sh\n")
+
+        subprocess.run(
+            [os.path.join(here, "crew"), "install", "--prefix", self.prefix],
+            capture_output=True, text=True)
+        crew_link = os.path.join(self.prefix, "crew")
+        reap_link = os.path.join(self.prefix, "crew-reap")
+        self.assertTrue(os.path.islink(crew_link))
+
+        os.remove(reap_link)
+        os.symlink(os.path.join(sibling, "crew-reap"), reap_link)
+
+        subprocess.run(
+            [crew_link, "install", "--uninstall", "--prefix", self.prefix],
+            check=True, capture_output=True, text=True)
+
+        self.assertFalse(os.path.exists(crew_link),
+                          "crew link should have been removed")
+        self.assertTrue(os.path.islink(reap_link),
+                         "sibling checkout's link should have been left alone")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
