@@ -104,7 +104,9 @@ and the exact merge command to follow with.
 
 If a worker committed its own work, `crew merge <worker>` also works directly,
 before stopping it. Merge takes a worker name or a branch, so it keeps working
-after the worker is gone.
+after the worker is gone. A live worker wins the name. If the name is also a
+branch of its own, merge cannot tell which you mean, so it refuses and prints
+the command for each.
 
 Reap may skip a worker you have only just stopped. Closing a tab leaves the
 agent's helper processes holding the directory for up to about two minutes,
@@ -112,8 +114,9 @@ and reap will not touch a worktree in use. That is the check working. Run reap
 again, or come back to it after the next piece of work.
 
 Each step refuses rather than guesses: merge will not run while the worker is
-working, into a checkout with tracked changes, or while its worktree still
-holds uncommitted work that is not on the branch.
+working, into a checkout with tracked changes, while its worktree still holds
+uncommitted work that is not on the branch, or when the name given means both
+a worker and a different branch.
 
 **Interrupting `crew wait` costs nothing.** It prints a change before marking
 it seen, so stopping it mid-wait can at worst repeat something, never lose it.

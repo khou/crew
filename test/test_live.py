@@ -359,6 +359,21 @@ class LiveTest(unittest.TestCase):
         self.assertNotEqual(p.returncode, 0)
         self.assertIn("no worker or branch", p.stdout)
 
+    def test_merge_refuses_a_name_that_is_both_a_worker_and_another_branch(self):
+        # The worker wins when the name means one thing. Here it means two,
+        # and merging either without saying which is a merge nobody asked for.
+        self.crew("spawn", "f", "a task", "--name", "m8", "--no-task")
+        self.commit_in(self.workers()["m8"]["cwd"], "workers.txt", "the worker")
+        subprocess.run(["git", "-C", self.repo, "branch", "m8"],
+                       capture_output=True)
+
+        p = self.crew("merge", "m8", "--force")
+        self.assertNotEqual(p.returncode, 0, p.stdout)
+        self.assertIn("crew/m8", p.stdout, "the worker's branch was not named")
+        self.assertIn("git -C", p.stdout, "no way given to ask for the branch")
+        self.assertFalse(os.path.exists(os.path.join(self.repo, "workers.txt")),
+                         "the worker's branch was merged anyway")
+
     def test_merge_refuses_while_the_worker_still_has_uncommitted_work(self):
         self.crew("spawn", "f", "a task", "--name", "m2", "--no-task")
         wt = self.workers()["m2"]["cwd"]

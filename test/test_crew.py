@@ -325,6 +325,112 @@ class MergeStaleCwdTest(unittest.TestCase):
                              "the worker's branch change was not merged in")
 
 
+class MergeAmbiguousNameTest(unittest.TestCase):
+    """One name, two things to merge, so merge refuses.
+
+    `crew merge` takes either a worker name or a branch name, and the worker
+    wins. When a name is both a live worker and a branch of its own, that
+    silently merges the worker's branch and never says so, which is a merge
+    of something the person did not ask for.
+    """
+
+    def setUp(self):
+        self.crew = crew_module()
+        self.tmp = tempfile.mkdtemp(prefix="crew-ambiguous-")
+        self.repo = os.path.join(self.tmp, "repo")
+        os.makedirs(self.repo)
+        self.git("init", "-q", "-b", "main")
+        self.commit("f.txt", "x")
+        self.crew.hook_sessions = lambda: {}
+        self.crew.refresh = lambda all_w, sessions, cfg: {
+            name: ("idle", ww) for name, ww in all_w.items()}
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def git(self, *args):
+        return subprocess.run(["git", "-C", self.repo, *args],
+                              capture_output=True, text=True)
+
+    def commit(self, name, text):
+        with open(os.path.join(self.repo, name), "w") as fh:
+            fh.write(text)
+        self.git("add", "-A")
+        self.git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "c")
+
+    def branch_holding(self, branch, name, text):
+        """A branch off main carrying one file, leaving main checked out."""
+        self.git("checkout", "-q", "-b", branch)
+        self.commit(name, text)
+        self.git("checkout", "-q", "main")
+
+    def merge(self, worker, force=False):
+        args = types.SimpleNamespace(worker=worker, force=force)
+        cwd, out = os.getcwd(), io.StringIO()
+        os.chdir(self.repo)
+        try:
+            with contextlib.redirect_stdout(out):
+                rc = self.crew.cmd_merge(args, {"agents": {}})
+        finally:
+            os.chdir(cwd)
+        return rc, out.getvalue()
+
+    def test_merge_refuses_a_name_that_is_both_a_worker_and_another_branch(self):
+        self.branch_holding("crew/foo", "worker.txt", "the worker's work")
+        self.branch_holding("foo", "branch.txt", "the branch's work")
+        self.crew.workers = lambda: {"foo": {
+            "repo": self.repo, "surface": "s", "branch": "crew/foo",
+            "task": "ambiguous"}}
+
+        cwd, out = os.getcwd(), io.StringIO()
+        os.chdir(self.repo)
+        try:
+            with contextlib.redirect_stdout(out):
+                with self.assertRaises(SystemExit):
+                    self.crew.cmd_merge(
+                        types.SimpleNamespace(worker="foo", force=True),
+                        {"agents": {}})
+        finally:
+            os.chdir(cwd)
+
+        said = out.getvalue()
+        self.assertIn("crew/foo", said, "the worker's branch was not named")
+        self.assertIn("foo", said, "the branch was not named")
+        self.assertIn(self.repo, said, "the repo holding the branch was not named")
+        # Nothing to act on unless it says how to ask for each one by itself.
+        self.assertIn("crew merge crew/foo", said)
+        self.assertIn(f"git -C {self.repo} merge --no-ff foo", said)
+        self.assertFalse(os.path.exists(os.path.join(self.repo, "worker.txt")))
+        self.assertFalse(os.path.exists(os.path.join(self.repo, "branch.txt")))
+
+    def test_a_worker_whose_own_branch_shares_its_name_still_merges(self):
+        # Every worker crew spawns is this case when its branch is named after
+        # it: one name, one thing to merge, so there is nothing to refuse.
+        self.branch_holding("solo", "solo.txt", "the worker's work")
+        self.crew.workers = lambda: {"solo": {
+            "repo": self.repo, "surface": "s", "branch": "solo",
+            "task": "ordinary"}}
+        rc, said = self.merge("solo")
+        self.assertEqual(rc, 0, said)
+        self.assertTrue(os.path.exists(os.path.join(self.repo, "solo.txt")), said)
+
+    def test_a_name_matching_only_a_branch_still_merges_that_branch(self):
+        self.branch_holding("just-a-branch", "loose.txt", "no worker here")
+        self.crew.workers = lambda: {}
+        rc, said = self.merge("just-a-branch")
+        self.assertEqual(rc, 0, said)
+        self.assertTrue(os.path.exists(os.path.join(self.repo, "loose.txt")), said)
+
+    def test_a_name_matching_only_a_worker_still_merges_that_worker(self):
+        self.branch_holding("crew/bar", "worker.txt", "the worker's work")
+        self.crew.workers = lambda: {"bar": {
+            "repo": self.repo, "surface": "s", "branch": "crew/bar",
+            "task": "worker only"}}
+        rc, said = self.merge("bar")
+        self.assertEqual(rc, 0, said)
+        self.assertTrue(os.path.exists(os.path.join(self.repo, "worker.txt")), said)
+
+
 class ScreenLifecycleTest(unittest.TestCase):
     """Agents whose reported lifecycle never changes."""
 
