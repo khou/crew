@@ -71,6 +71,15 @@ class DeathTest(unittest.TestCase):
         state, _ = self.crew.worker_state({"surface": "s1", "started": 0}, sessions)
         self.assertEqual(state, "gone")
 
+    def test_no_hook_session_alone_does_not_make_an_old_worker_gone(self):
+        # Some agents only register a hook session lazily, on their first
+        # hook fire. A worker older than 60s with no session yet and no
+        # recorded exit is still starting, not dead.
+        sessions = {}
+        state, _ = self.crew.worker_state(
+            {"surface": "s1", "started": time.time() - 3600}, sessions)
+        self.assertEqual(state, "starting")
+
     def test_the_wrapper_records_the_exit_before_dropping_to_a_shell(self):
         marker = self.crew.exit_marker("s1")
         script = self.crew_launch_script("s1")
@@ -142,6 +151,51 @@ class WorkerDirTest(unittest.TestCase):
         sessions = {"s": {"cwd": "/from/session"}}
         got = self.crew.worker_dir("nosuchworker", w, sessions)
         self.assertEqual(got, "/fallback")
+
+
+class MergeSelfTest(unittest.TestCase):
+    """A worker that resolves to the primary checkout has nothing to merge.
+
+    A worker registered without its own worktree resolves to the checkout
+    you are merging into. Merging its branch into that same checkout is a
+    merge of a branch into itself: git reports "Already up to date" and
+    crew must not read that as a successful merge of the worker's work.
+    """
+
+    def setUp(self):
+        self.crew = crew_module()
+        self.tmp = tempfile.mkdtemp(prefix="crew-selfmerge-")
+        self.repo = os.path.join(self.tmp, "repo")
+        os.makedirs(self.repo)
+        for cmd in (["init", "-q", "-b", "main"],):
+            subprocess.run(["git", *cmd], cwd=self.repo, capture_output=True)
+        with open(os.path.join(self.repo, "f.txt"), "w") as fh:
+            fh.write("x")
+        subprocess.run(["git", "add", "-A"], cwd=self.repo, capture_output=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "-qm", "i"], cwd=self.repo, capture_output=True)
+        self.crew.hook_sessions = lambda: {}
+        self.crew.worker_state = lambda w, sessions: ("idle", {})
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_merge_refuses_when_the_worker_resolves_to_the_primary_checkout(self):
+        w = {"repo": self.repo, "cwd": self.repo, "surface": "s",
+             "branch": "main", "task": "self merge"}
+        self.crew.workers = lambda: {"w1": w}
+        args = types.SimpleNamespace(worker="w1", force=False)
+        cwd = os.getcwd()
+        os.chdir(self.repo)
+        try:
+            with self.assertRaises(SystemExit):
+                self.crew.cmd_merge(args, {})
+        finally:
+            os.chdir(cwd)
+        out = subprocess.run(["git", "-C", self.repo, "log", "--oneline"],
+                             capture_output=True, text=True).stdout
+        self.assertEqual(len(out.strip().splitlines()), 1,
+                         "no merge commit should have been created")
 
 
 class ScreenLifecycleTest(unittest.TestCase):
@@ -284,6 +338,15 @@ class QuotaOnlyInTheTailTest(unittest.TestCase):
         screen = "\n".join([f"line {i}" for i in range(12)]
                            + ["you have hit your usage limit"])
         self.assertEqual(self.state(screen), "quota")
+
+    def test_a_mention_mid_tail_with_more_output_after_it_is_not_a_stop(self):
+        # The worker warns about rate limits while still working, then keeps
+        # producing unrelated output afterward. It is still running: only
+        # the true end of the screen says whether it actually stopped there.
+        screen = "\n".join([f"line {i}" for i in range(4)]
+                           + ["note: watch for rate limit errors on retries"]
+                           + [f"line {i}" for i in range(4, 8)])
+        self.assertEqual(self.state(screen), "running")
 
 
 class QuotaPatternTest(unittest.TestCase):
@@ -457,6 +520,22 @@ class LaunchTest(unittest.TestCase):
             self.assertEqual(cfg["roles"]["worker"]["agent"], "claude",
                              "overriding one field dropped the rest of the role")
             self.assertIn("planner", cfg["roles"])
+            del os.environ["CREW_CONFIG"]
+
+    def test_invalid_config_warns_and_falls_back_to_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "crew.json")
+            with open(path, "w") as fh:
+                fh.write("{not valid json")
+            os.environ["CREW_CONFIG"] = path
+            mod = crew_module()
+            printed = []
+            mod.log = lambda msg="": printed.append(msg)
+            cfg = mod.config()
+            self.assertEqual(cfg["auto_approve"], mod.DEFAULTS["auto_approve"])
+            self.assertTrue(any(path in msg and "warning" in msg
+                                for msg in printed),
+                            f"expected a warning naming {path}, got {printed}")
             del os.environ["CREW_CONFIG"]
 
     def test_shell_quoting_survives_a_task_with_quotes(self):
