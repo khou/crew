@@ -9,8 +9,10 @@ silent, and every one of these was a real bug at some point.
 Run: python3 test/test_crew.py
 """
 
+import contextlib
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 import re
@@ -585,6 +587,45 @@ class LaunchTest(unittest.TestCase):
     def test_shell_quoting_survives_a_task_with_quotes(self):
         q = self.crew.shell_quote("don't; rm -rf /")
         self.assertEqual(q, """'don'\\''t; rm -rf /'""")
+
+
+class SayToAWorkerWithARemovedAgentTest(unittest.TestCase):
+    """workers.json can outlive crew.json: a worker recorded against an agent
+    that was since deleted from the config must not crash `crew say`."""
+
+    def setUp(self):
+        self.crew = crew_module()
+        self.crew.workers = lambda: {
+            "stale": {"agent": "ghost", "surface": "s1", "workspace": "ws"},
+        }
+
+    def test_say_reports_the_missing_agent_instead_of_crashing(self):
+        args = types.SimpleNamespace(worker="stale", message="hi", now=False)
+        cfg = {"agents": {"claude": {}}}
+        out = io.StringIO()
+        with self.assertRaises(SystemExit) as ctx:
+            with contextlib.redirect_stdout(out):
+                self.crew.cmd_say(args, cfg)
+        self.assertEqual(ctx.exception.code, 1)
+        printed = out.getvalue()
+        self.assertIn("stale", printed)
+        self.assertIn("ghost", printed)
+        self.assertNotIn("Traceback", printed)
+
+    def test_say_still_works_for_an_agent_configured_with_an_empty_spec(self):
+        # A configured agent can legitimately have no per-agent overrides, so
+        # its spec is `{}` -- that must not be mistaken for "not configured".
+        self.crew.workers = lambda: {
+            "sparse": {"agent": "claude", "surface": "s1", "workspace": "ws"},
+        }
+        self.crew.hook_sessions = lambda: {}
+        delivered = {}
+        self.crew.deliver = lambda ws, surface, text, spec: delivered.update(
+            ws=ws, surface=surface, text=text, spec=spec) or (True, "")
+        args = types.SimpleNamespace(worker="sparse", message="hi", now=False)
+        cfg = {"agents": {"claude": {}}}
+        self.assertEqual(self.crew.cmd_say(args, cfg), 0)
+        self.assertEqual(delivered["spec"], {})
 
 
 if __name__ == "__main__":
