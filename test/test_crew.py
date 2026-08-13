@@ -71,6 +71,15 @@ class DeathTest(unittest.TestCase):
         state, _ = self.crew.worker_state({"surface": "s1", "started": 0}, sessions)
         self.assertEqual(state, "gone")
 
+    def test_no_hook_session_alone_does_not_make_an_old_worker_gone(self):
+        # Some agents only register a hook session lazily, on their first
+        # hook fire. A worker older than 60s with no session yet and no
+        # recorded exit is still starting, not dead.
+        sessions = {}
+        state, _ = self.crew.worker_state(
+            {"surface": "s1", "started": time.time() - 3600}, sessions)
+        self.assertEqual(state, "starting")
+
     def test_the_wrapper_records_the_exit_before_dropping_to_a_shell(self):
         marker = self.crew.exit_marker("s1")
         script = self.crew_launch_script("s1")
