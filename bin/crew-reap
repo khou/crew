@@ -124,8 +124,17 @@ def resolve_roots(cfg):
         return cfg["roots"]
     rc, out = run(["git", "rev-parse", "--show-toplevel"])
     if rc == 0 and out:
-        # Run from inside a repo: that repo's neighbours are the obvious scope.
-        return [os.path.dirname(os.path.realpath(out))]
+        # Run from inside a repo: that repo's neighbours are the obvious
+        # scope. From a linked worktree, --show-toplevel points at the
+        # worktree itself, not the primary checkout, so find the primary
+        # via the git dir shared by every worktree instead.
+        rc2, common = run(["git", "rev-parse", "--git-common-dir"])
+        primary = os.path.realpath(out)
+        if rc2 == 0 and common:
+            common = os.path.realpath(common)
+            if os.path.basename(common) == ".git":
+                primary = os.path.dirname(common)
+        return [os.path.dirname(primary)]
     return [os.path.join(HOME, d) for d in COMMON_ROOTS
             if os.path.isdir(os.path.join(HOME, d))]
 
@@ -301,16 +310,28 @@ def dirty_files(wt):
     # --no-optional-locks keeps git from rewriting the index just to look at
     # it. Without it, scanning makes every worktree appear freshly active and
     # the next run skips them all.
+    # -z gives NUL-terminated, never-quoted paths. The default --porcelain
+    # format C-quotes anything with a Unicode or unusual byte in it, so
+    # paths like that were coming back as their literal escaped form
+    # ("\346\226\207.txt") instead of the real filename.
     rc, out = run(["git", "--no-optional-locks", "status", "--porcelain",
-                   "--untracked-files=all"], cwd=wt)
+                   "--untracked-files=all", "-z"], cwd=wt)
     if rc != 0:
         return None
+    tokens = out.split("\0")
     paths = []
-    for line in out.splitlines():
-        p = line[3:].strip()
-        if " -> " in p:
-            p = p.split(" -> ", 1)[1]
-        paths.append(p.strip('"'))
+    i = 0
+    while i < len(tokens):
+        entry = tokens[i]
+        i += 1
+        if not entry:
+            continue
+        status, p = entry[:2], entry[3:]
+        if status[0] in "RC":
+            # Rename/copy: this record's path is followed by the old path
+            # as a separate NUL-terminated field.
+            i += 1
+        paths.append(p)
     return paths
 
 
@@ -482,8 +503,15 @@ def apply_plan(d):
         if rc == 0 and sha:
             name = "crew-rescued/" + os.path.basename(path)
             rc2, out2 = run(["git", "branch", name, sha], cwd=repo)
-            if rc2 != 0 and "already exists" not in out2:
-                return False, f"could not save detached commits to a branch: {out2}"
+            if rc2 != 0:
+                if "already exists" not in out2:
+                    return False, f"could not save detached commits to a branch: {out2}"
+                rc3, existing_sha = run(["git", "rev-parse", name], cwd=repo)
+                if rc3 != 0 or existing_sha != sha:
+                    return False, (
+                        f"rescue branch {name} already exists and points "
+                        f"elsewhere, worktree left in place: {out2}"
+                    )
 
     if d["locked"]:
         # Only ever an agent's own stale lock: a lock set by a person is
