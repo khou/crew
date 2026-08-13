@@ -251,6 +251,29 @@ class ReapTest(unittest.TestCase):
         self.assertIn(missing, out)
         self.assertFalse(os.path.exists(wt), "the valid repo's worktree was not reaped")
 
+    def test_overlapping_repo_args_are_deduplicated(self):
+        # Passing the primary checkout and one of its own linked worktrees as
+        # two --repo values both normalize (via primary_checkout) to the same
+        # repo. Without deduplication that repo's worktrees are listed and
+        # planned twice, so each candidate shows up twice in the output.
+        idle = self.worktree("idle")
+        editor = self.worktree("editor")
+
+        out = self.reap("--repo", editor)
+        self.assertEqual(out.count(idle), 1,
+                         "worktree appeared more than once after overlapping --repo")
+        self.assertEqual(out.count(editor), 1,
+                         "linked worktree appeared more than once after overlapping --repo")
+
+        p = subprocess.run(
+            [REAP, "--repo", self.repo, "--repo", editor, "--apply"],
+            capture_output=True, text=True,
+            env=dict(os.environ, CREW_REAP_CONFIG=self.cfg_path), cwd=self.tmp)
+        applied = p.stdout + p.stderr
+        self.assertNotIn("Traceback", applied)
+        self.assertEqual(p.returncode, 0)
+        self.assertFalse(os.path.exists(idle))
+
     def test_run_from_inside_a_linked_worktree_finds_the_repo(self):
         # Run from inside a linked worktree with no --repo (roots guessed):
         # resolve_roots used to take the worktree's own parent directory. For
