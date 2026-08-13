@@ -480,6 +480,125 @@ class ReapTest(unittest.TestCase):
         ls_tree = git(self.repo, "ls-tree", "-r", "has-nested")
         self.assertNotIn("160000", ls_tree, "a gitlink was committed to the branch")
 
+    def test_worktree_holding_another_worktree_is_not_removed(self):
+        # crew puts worktrees at <repo>/.claude/worktrees/<name>, which is
+        # gitignored, so an agent that itself spawns a worktree ends up with
+        # one nested inside another. git status never mentions the inner one,
+        # so the outer looks clean and `git worktree remove` deletes the whole
+        # tree, inner worktree and its uncommitted work with it.
+        outer = self.worktree("outer")
+        inner = os.path.join(outer, "build", "inner")  # build/ is gitignored
+        git(self.repo, "worktree", "add", "-q", inner, "-b", "inner")
+        self.write("notes.md", "work inside the inner worktree", root=inner)
+        # The inner one is spoken for, so nothing else would preserve it.
+        git(self.repo, "worktree", "lock", "--reason", "do not delete", inner)
+
+        self.reap("--apply")
+
+        self.assertTrue(os.path.exists(os.path.join(inner, "notes.md")),
+                        "the inner worktree's uncommitted work was destroyed")
+        self.assertTrue(os.path.isdir(outer),
+                        "a worktree holding another worktree was removed")
+
+    def test_pruning_a_vanished_detached_worktree_keeps_its_commits(self):
+        # A worktree record is a gc root for its HEAD. Someone rm -rf'd the
+        # directory, so the commits now hang off nothing but that record, and
+        # `git worktree prune` is what makes them collectable.
+        wt = self.worktree("orphan-gone", detach=True)
+        self.write("done.txt", "committed, then the directory was deleted", root=wt)
+        git(wt, "add", "-A")
+        git(wt, "commit", "-qm", "detached work")
+        sha = git(wt, "rev-parse", "HEAD")
+        shutil.rmtree(wt)
+
+        self.reap("--apply")
+
+        self.assertTrue(git(self.repo, "branch", "--contains", sha, check=False),
+                        "the detached commits are no longer reachable from any ref")
+
+    def test_a_worktree_removed_mid_run_fails_cleanly(self):
+        # Another agent can remove its own worktree between the plan and the
+        # apply. subprocess.run(cwd=<gone>) raises FileNotFoundError, which
+        # aborted the whole pass, so every worktree queued behind this one was
+        # silently left alone.
+        reap = reap_module()
+        wt = self.worktree("vanishing")
+        self.write("notes.md", "work", root=wt)
+        cfg = dict(reap.DEFAULTS, idle_minutes=0)
+        wtd = next(t for t in reap.list_worktrees(self.repo)
+                   if os.path.basename(t["path"]) == "vanishing")
+        d = reap.plan_worktree(self.repo, wtd, cfg, set())
+        self.assertEqual(d["action"], "commit+remove")
+
+        shutil.rmtree(wt)
+        ok, msg = reap.apply_plan(d)
+
+        self.assertFalse(ok, "reported success for a worktree that had gone")
+        self.assertTrue(msg)
+
+    def test_a_deeply_nested_session_registry_does_not_abort_the_run(self):
+        # Registry files belong to other tools and are read as found. A
+        # syntactically valid but very deep one blows json's recursion limit,
+        # and RecursionError is not a ValueError, so it escaped the guard and
+        # took the whole run with it.
+        wt = self.worktree("idle")
+        reg = os.path.join(self.tmp, "sessions.json")
+        with open(reg, "w") as fh:
+            fh.write("[" * 20000 + "]" * 20000)
+        self.config({"session_registries": [reg]})
+
+        out = self.reap("--apply")
+
+        self.assertNotIn("Traceback", out)
+        self.assertFalse(os.path.exists(wt),
+                         "an unreadable registry stopped anything being reaped")
+
+    def test_an_out_of_range_pid_in_a_registry_does_not_abort_the_run(self):
+        # os.kill() with a pid too large for a C pid_t raises OverflowError,
+        # which pid_alive did not catch.
+        wt = self.worktree("idle")
+        reg = os.path.join(self.tmp, "sessions.json")
+        with open(reg, "w") as fh:
+            json.dump({"sessions": {"a": {"cwd": wt, "pid": 10 ** 30}}}, fh)
+        self.config({"session_registries": [reg]})
+
+        out = self.reap("--apply")
+
+        self.assertNotIn("Traceback", out)
+        self.assertFalse(os.path.exists(wt),
+                         "a nonsense pid protected the worktree forever")
+
+    def test_a_worktree_path_with_a_newline_is_parsed_and_reaped(self):
+        # `git worktree list --porcelain` prints paths raw. A newline in one
+        # splits the record: the head of the path became the "path", which
+        # does not exist on disk, so the live worktree was mistaken for a
+        # stale record and its uncommitted work was never committed.
+        wt = os.path.join(self.tmp, "new\nline")
+        git(self.repo, "worktree", "add", "-q", wt, "-b", "newline-branch")
+        self.write("notes.md", "work behind a newline", root=wt)
+
+        self.reap("--apply")
+
+        self.assertEqual(git(self.repo, "show", "newline-branch:notes.md"),
+                         "work behind a newline")
+        self.assertFalse(os.path.exists(wt), "the worktree was never reaped")
+
+    def test_a_directory_name_that_is_not_a_ref_name_still_rescues(self):
+        # The rescue branch was the directory's basename verbatim. Directory
+        # names allow characters ref names do not, so `git branch` refused and
+        # the worktree could never be reaped: every run failed the same way.
+        wt = self.worktree("has space", detach=True)
+        self.write("done.txt", "committed detached work", root=wt)
+        git(wt, "add", "-A")
+        git(wt, "commit", "-qm", "detached work")
+        sha = git(wt, "rev-parse", "HEAD")
+
+        out = self.reap("--apply")
+
+        self.assertTrue(git(self.repo, "branch", "--contains", sha, check=False),
+                        "the detached commits were left unreachable")
+        self.assertFalse(os.path.exists(wt), f"the worktree was never reaped:\n{out}")
+
     def test_second_apply_is_a_no_op(self):
         self.worktree("once")
         self.reap("--apply")
