@@ -71,6 +71,15 @@ class DeathTest(unittest.TestCase):
         state, _ = self.crew.worker_state({"surface": "s1", "started": 0}, sessions)
         self.assertEqual(state, "gone")
 
+    def test_no_hook_session_alone_does_not_make_an_old_worker_gone(self):
+        # Some agents only register a hook session lazily, on their first
+        # hook fire. A worker older than 60s with no session yet and no
+        # recorded exit is still starting, not dead.
+        sessions = {}
+        state, _ = self.crew.worker_state(
+            {"surface": "s1", "started": time.time() - 3600}, sessions)
+        self.assertEqual(state, "starting")
+
     def test_the_wrapper_records_the_exit_before_dropping_to_a_shell(self):
         marker = self.crew.exit_marker("s1")
         script = self.crew_launch_script("s1")
@@ -284,6 +293,15 @@ class QuotaOnlyInTheTailTest(unittest.TestCase):
         screen = "\n".join([f"line {i}" for i in range(12)]
                            + ["you have hit your usage limit"])
         self.assertEqual(self.state(screen), "quota")
+
+    def test_a_mention_mid_tail_with_more_output_after_it_is_not_a_stop(self):
+        # The worker warns about rate limits while still working, then keeps
+        # producing unrelated output afterward. It is still running: only
+        # the true end of the screen says whether it actually stopped there.
+        screen = "\n".join([f"line {i}" for i in range(4)]
+                           + ["note: watch for rate limit errors on retries"]
+                           + [f"line {i}" for i in range(4, 8)])
+        self.assertEqual(self.state(screen), "running")
 
 
 class QuotaPatternTest(unittest.TestCase):
