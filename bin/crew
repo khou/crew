@@ -897,8 +897,15 @@ def wait_loop(args, cfg):
                     # the prompt. Look again next time round rather than
                     # waking the director for something about to be handled.
                     continue
-            if state != w.get("seen") and state in interesting:
-                changed.append((name, state, w))
+            if state != w.get("seen"):
+                if state in interesting:
+                    changed.append((name, state, w))
+                else:
+                    # Not news itself, but the state changed, so re-arm: the
+                    # next return to an interesting state must be reported
+                    # even if it matches what was last seen before this dip.
+                    w["seen"] = state
+                    put_worker(name, w)
         if changed:
             # Printed before it is marked seen. An interrupt between the two
             # can then only repeat a change, never swallow one, and repeating

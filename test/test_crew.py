@@ -262,6 +262,39 @@ class WaitTest(unittest.TestCase):
         self.assertEqual(marked, [],
                          "the change was marked seen despite never being shown")
 
+    def test_idle_is_reported_again_after_a_run_in_between(self):
+        # idle -> running -> idle must be reported twice. A worker that goes
+        # back to work and finishes again is news each time, not just once.
+        crew = crew_module()
+        worker = {"role": "r", "task": "t", "surface": "s"}
+        crew.workers = lambda: {"w": worker}
+        crew.hook_sessions = lambda: {}
+        crew.put_worker = lambda name, w: None
+
+        current = ["idle"]
+        crew.refresh = lambda all_w, sessions, cfg: {"w": (current[0], worker)}
+
+        printed = []
+        crew.log = lambda msg="": printed.append(msg)
+
+        rc = crew.cmd_wait(types.SimpleNamespace(timeout=1, poll=0.01), {})
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(printed), 1, "first idle was not reported")
+        self.assertIn("idle", printed[0])
+
+        current[0] = "running"
+        rc = crew.cmd_wait(types.SimpleNamespace(timeout=0.05, poll=0.01), {})
+        self.assertEqual(rc, 0)
+
+        current[0] = "idle"
+        printed.clear()
+        rc = crew.cmd_wait(types.SimpleNamespace(timeout=1, poll=0.01), {})
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(printed), 1,
+                         "idle after a run in between was not reported")
+        self.assertIn("idle", printed[0],
+                       "expected a worker report, got: " + printed[0])
+
 
 class LaunchTest(unittest.TestCase):
     def setUp(self):
