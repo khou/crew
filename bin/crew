@@ -815,12 +815,15 @@ def refresh(all_w, sessions, cfg):
         if state not in ("gone",):
             screen = read_screen(w["workspace"], w["surface"], 40)
 
-        # Only the tail. A worker whose work is about rate limits will write
-        # the words "rate limit" and "quota" into its output, and a review of
-        # this very file did exactly that and was reported as exhausted. An
-        # agent that has actually run out says so last, where it stopped.
-        tail = "\n".join(screen.splitlines()[-8:]) if screen else ""
-        if tail and any(re.search(p, tail, re.I) for p in patterns):
+        # Only the true end of the screen. A worker whose work is about rate
+        # limits will write the words "rate limit" and "quota" into its
+        # output, and a review of this very file did exactly that and was
+        # reported as exhausted. An agent that has actually run out says so
+        # last, where it stopped; if output keeps coming after the mention,
+        # it is still running.
+        last_lines = [l for l in screen.splitlines() if l.strip()][-2:]
+        if last_lines and any(re.search(p, "\n".join(last_lines), re.I)
+                               for p in patterns):
             state = "quota"
 
         # A session can report needsInput and then finish the turn without
