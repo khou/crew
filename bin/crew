@@ -1232,6 +1232,9 @@ def cmd_say(args, cfg):
     w = workers().get(args.worker)
     if not w:
         die(f"no worker called {args.worker}")
+    if w["agent"] not in cfg["agents"]:
+        die(f"{args.worker} uses unknown agent {w['agent']}. It may have been "
+            "removed from the config.", 1)
     spec = cfg["agents"][w["agent"]]
     sessions = hook_sessions()
     s = sessions.get(w["surface"], {})
