@@ -45,7 +45,11 @@ Change any of it in `~/.config/crew/crew.json`.
   comparing, so thinking does not read as stuck.
 - A worker that has **run out of plan allowance**. crew then refuses to spawn
   more workers on that agent, because they all share one subscription and
-  starting three more spends nothing while hiding the problem.
+  starting three more spends nothing while hiding the problem. Honestly: these
+  patterns have never been matched against a real exhaustion event, so a match
+  is a strong hint and a non-match tells you nothing. What has been checked is
+  the opposite direction, that they do not fire on healthy sessions, including
+  one whose status line read `api 0% left`, which does not mean exhausted.
 - A worker that **died, or never started**. State comes from the terminal, not
   from the worker reporting in, so a crash still shows up truthfully.
 

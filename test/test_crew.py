@@ -13,6 +13,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -158,6 +159,51 @@ class ScreenLifecycleTest(unittest.TestCase):
     def test_an_agent_with_a_trustworthy_lifecycle_is_left_alone(self):
         # A quiet screen is not idleness for these; that is what stalled is for.
         self.assertEqual(self.refresh({}, 30), "running")
+
+
+class StaleNeedsInputTest(unittest.TestCase):
+    """A session that says it needs input, then quietly finishes the turn."""
+
+    def setUp(self):
+        self.crew = crew_module()
+        self.crew.put_worker = lambda name, w: None
+
+    def state(self, screen):
+        self.crew.read_screen = lambda ws, surface, lines=40: screen
+        cfg = dict(self.crew.DEFAULTS)
+        cfg["agents"] = {"a": {"approval": {"prompt": [r"Do you want to proceed"]},
+                               "blocked": [r"Press any key to log in"]}}
+        w = {"agent": "a", "surface": "s", "workspace": "ws", "role": "r",
+             "task": "t", "fp": "x", "fp_at": time.time()}
+        sessions = {"s": {"state": "needsInput", "pid": os.getpid()}}
+        return self.crew.refresh({"w": w}, sessions, cfg)["w"][0]
+
+    def test_nothing_asking_on_screen_means_it_is_not_waiting(self):
+        # Measured on a real session: it reported needsInput, finished the
+        # turn, and never updated. A director would relay a question nobody
+        # is asking.
+        self.assertEqual(self.state("the work is done, at the prompt"), "idle")
+
+    def test_a_real_question_still_counts_as_needing_input(self):
+        self.assertEqual(self.state("Do you want to proceed?"), "needsInput")
+
+    def test_a_login_screen_still_counts_as_needing_input(self):
+        self.assertEqual(self.state("Press any key to log in"), "needsInput")
+
+
+class QuotaPatternTest(unittest.TestCase):
+    def test_an_allowance_indicator_is_not_an_exhausted_plan(self):
+        # Real status lines from healthy sessions. A pattern matching "0% left"
+        # or a bare percentage would stop the fleet for no reason.
+        crew = crew_module()
+        healthy = [
+            "stall1 | Haiku 4.5 | ctx 21% | 5h 36% (23:20) | wk 51% | $0.10",
+            "ga | Composer 2.5 | main | api 0% left (Aug 17) | toko 113 memories",
+            "ga | gpt-5.6-sol max | No changes | Context 0% used | weekly 100% left | Ready",
+        ]
+        for line in healthy:
+            hits = [p for p in crew.QUOTA_PATTERNS if re.search(p, line, re.I)]
+            self.assertEqual(hits, [], f"false positive on a healthy screen: {line}")
 
 
 class WaitTest(unittest.TestCase):

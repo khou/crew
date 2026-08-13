@@ -371,11 +371,28 @@ class LiveTest(unittest.TestCase):
         self.assertIn("GOT: urgent", self.screen("w8"))
 
     def test_status_reports_the_state_cmux_sees(self):
+        # needsInput is believed only when something on screen is actually
+        # asking. A real session was measured reporting needsInput and then
+        # finishing its turn without ever updating, which had the director
+        # relaying a question nobody had asked. The blocked pattern here is
+        # what the fake agent prints, so there is a real prompt on screen.
+        self.write_config({
+            "agents": {"fake": fake("fake-agent", blocked=[r"for shortcuts"])},
+            "roles": {"f": {"agent": "fake", "permission": "edit"}},
+            "ready_timeout": 25, "auto_approve": False,
+        })
         self.crew("spawn", "f", "first", "--name", "w9", "--no-task")
         self.fake_session("w9", "needsInput")
         p = self.crew("status")
         self.assertIn("needsInput", p.stdout)
         self.assertIn("waiting on you: w9", p.stdout)
+
+    def test_status_does_not_relay_a_question_nobody_is_asking(self):
+        self.crew("spawn", "f", "first", "--name", "w10", "--no-task")
+        self.fake_session("w10", "needsInput")
+        p = self.crew("status")
+        self.assertIn("idle", p.stdout, p.stdout)
+        self.assertNotIn("waiting on you", p.stdout)
 
     def test_status_says_gone_when_the_process_has_died(self):
         self.crew("spawn", "f", "first", "--name", "w10", "--no-task")

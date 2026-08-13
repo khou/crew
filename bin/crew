@@ -698,6 +698,17 @@ def cmd_status(args, cfg):
         return 0
     log(f"{'worker':28} {'role':10} {'agent':8} {'state':10} where")
     seen = refresh(all_w, sessions, cfg)
+    # Answer routine requests here too. A director that polls status rather
+    # than waiting would otherwise leave its whole fleet stopped on "may I
+    # run this", which is the opposite of the point.
+    if cfg.get("auto_approve", True):
+        for name, (state, w) in list(seen.items()):
+            if state != "needsInput":
+                continue
+            ok, _why = approve(w["workspace"], w["surface"],
+                               cfg["agents"].get(w["agent"], {}))
+            if ok:
+                seen[name] = ("running", w)
     for name, (state, w) in sorted(seen.items()):
         actual = worker_dir(name, w, sessions)
         try:
@@ -789,6 +800,16 @@ def refresh(all_w, sessions, cfg):
 
         if screen and any(re.search(p, screen, re.I) for p in patterns):
             state = "quota"
+
+        # A session can report needsInput and then finish the turn without
+        # ever saying so, leaving a stale record that makes a director relay
+        # a question nobody is asking. If nothing on screen is waiting for an
+        # answer, it is not waiting.
+        if state == "needsInput" and screen:
+            asking = list((spec.get("approval") or {}).get("prompt") or [])
+            asking += list(spec.get("blocked") or [])
+            if not any(re.search(p, screen) for p in asking):
+                state = "idle"
 
         if screen:
             fp = screen_fingerprint(screen)

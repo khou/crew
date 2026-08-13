@@ -43,6 +43,10 @@ picture instead of just what changed.
 | `stalled` | claims to be working but its screen has not changed | read the tab; restart it or give it a smaller piece |
 | `quota` | showing a plan-limit message | stop spawning on that agent, tell the human |
 
+`needsInput` means something is genuinely on screen waiting for an answer. A
+session that says it needs input and then quietly finishes its turn is reported
+as `idle`, because nothing is asking.
+
 ## Choosing a role
 
 Roles pair an agent with a model, an effort level, and a permission level.
