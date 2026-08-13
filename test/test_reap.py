@@ -369,6 +369,23 @@ class ReapTest(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(self.repo, "build/keep/unique.png")),
                         ".crew.json rescue list was ignored")
 
+    def test_a_rescue_path_cannot_reach_outside_the_repo(self):
+        # .crew.json is checked in, so its rescue list is whatever the repo's
+        # author wrote. A ../ entry made reap read from one place and write to
+        # another, both outside the repo, planting files anywhere nothing
+        # existed yet. The worktree sits deeper than the repo here because
+        # that is what makes the escaped source and destination differ.
+        self.write(".crew.json", json.dumps({"rescue": ["../outside/planted"]}))
+        wt = self.worktree("nest/deep/wt")
+        self.write("evil.txt", "planted",
+                   root=os.path.join(wt, "..", "outside", "planted"))
+        escaped = os.path.join(self.tmp, "outside", "planted", "evil.txt")
+
+        out = self.reap("--apply")
+
+        self.assertFalse(os.path.exists(escaped),
+                         f"a rescue path escaped the repo and planted a file:\n{out}")
+
     def test_scanning_does_not_make_worktrees_look_active(self):
         # Backdate the worktree's git metadata so it starts out plainly idle.
         # Without that, a freshly created worktree is correctly "active now"

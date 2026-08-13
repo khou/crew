@@ -172,9 +172,18 @@ def rescue_paths(repo, cfg):
     paths += list(cfg.get("rescue", {}).get(os.path.realpath(repo)) or [])
     seen, out = set(), []
     for p in paths:
-        if p not in seen:
-            seen.add(p)
-            out.append(p)
+        if p in seen:
+            continue
+        seen.add(p)
+        # .crew.json is checked in, so this list is whatever the repo's author
+        # wrote, and every entry is joined onto both the worktree and the
+        # primary, for a read and then a write. One that climbs out of the repo
+        # copies files somewhere nobody asked for. Resolved rather than matched
+        # on "..", so a longer way round does not get past it.
+        if os.path.isabs(p) or not is_under(os.path.join(repo, p), repo):
+            log(f"warning: ignoring rescue path outside the repo: {p!r}")
+            continue
+        out.append(p)
     return out
 
 
