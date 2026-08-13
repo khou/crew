@@ -449,6 +449,13 @@ def plan_worktree(repo, wt, cfg, live):
     d["protected"] = wt.get("branch") in cfg["protected_branches"]
 
     if files:
+        for rel in files:
+            if os.path.exists(os.path.join(path, rel, ".git")):
+                d["action"] = "skip"
+                d["reason"] = (f"{rel} is a nested git repo. `git add -A` would "
+                                "stage it as a gitlink, not its files. Remove or "
+                                "commit it by hand first.")
+                return d
         total = 0
         for rel in files:
             try:

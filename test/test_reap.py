@@ -412,6 +412,32 @@ class ReapTest(unittest.TestCase):
             os.link(real, os.path.join(d, f"link{i}.bin"))
         self.assertEqual(reap_module().dir_size(d), 400000)
 
+    def test_nested_git_repo_is_skipped_not_staged_as_gitlink(self):
+        # A nested repo (e.g. a cloned dependency, or another agent's
+        # worktree left inside this one) has its own .git. `git add -A`
+        # doesn't add its files: it stages the nested repo itself as a
+        # commit reference (a gitlink, mode 160000) pointing at a commit
+        # that lives nowhere else, a dangling reference the moment this
+        # worktree is removed.
+        wt = self.worktree("has-nested")
+        nested = os.path.join(wt, "vendor", "nested")
+        os.makedirs(nested)
+        git(nested, "init", "-q", "-b", "main")
+        self.write("f.txt", "nested repo content", root=nested)
+        git(nested, "add", "-A")
+        git(nested, "commit", "-qm", "nested init")
+
+        out = self.reap("--apply")
+
+        self.assertTrue(os.path.isdir(wt), "worktree with a nested repo was removed")
+        self.assertTrue(os.path.exists(os.path.join(nested, "f.txt")),
+                        "nested repo's file did not survive")
+        self.assertIn("skip", out)
+        self.assertNotIn("FAILED", out)
+        self.assertIn("has-nested", self.branches(), "branch was removed")
+        ls_tree = git(self.repo, "ls-tree", "-r", "has-nested")
+        self.assertNotIn("160000", ls_tree, "a gitlink was committed to the branch")
+
     def test_second_apply_is_a_no_op(self):
         self.worktree("once")
         self.reap("--apply")
