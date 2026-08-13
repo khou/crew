@@ -791,10 +791,10 @@ def worker_state(w, sessions):
         return "gone", sessions.get(w["surface"], {})
     s = sessions.get(w["surface"], {})
     if not s:
-        # No session recorded yet. Either it is still starting, or whatever
-        # was there has gone without cmux noticing.
-        age = time.time() - w.get("started", 0)
-        return "starting" if age < 60 else "gone", s
+        # No session recorded. Most agents register one at launch, but some
+        # only register lazily on their first hook fire, so absence alone is
+        # never proof of death -- only a recorded exit (checked above) is.
+        return "starting", s
     if not pid_alive(s.get("pid")):
         return "gone", s
     return s.get("state", "unknown"), s
