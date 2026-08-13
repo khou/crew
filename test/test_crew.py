@@ -266,6 +266,20 @@ class QuotaOnlyInTheTailTest(unittest.TestCase):
                          + [f"line {i}" for i in range(12)])
         self.assertEqual(self.state(body), "running")
 
+    def test_a_permission_prompt_mentioning_quota_is_not_exhaustion(self):
+        # Reproduced live: a fixer asked to run QuotaOnlyInTheTailTest and was
+        # marked exhausted, which also stopped it being approved, so it stuck.
+        self.crew.read_screen = lambda ws, surface, lines=40: (
+            "Do you want to proceed?\n 2. Yes, and do not ask again for: "
+            "python3 test/test_crew.py QuotaOnlyInTheTailTest")
+        cfg = dict(self.crew.DEFAULTS)
+        cfg["agents"] = {"a": {"approval": {"prompt": [r"Do you want to proceed"]}}}
+        w = {"agent": "a", "surface": "s", "workspace": "ws", "role": "r",
+             "task": "t", "fp": "x", "fp_at": time.time()}
+        sessions = {"s": {"state": "needsInput", "pid": os.getpid()}}
+        self.assertNotEqual(
+            self.crew.refresh({"w": w}, sessions, cfg)["w"][0], "quota")
+
     def test_a_limit_where_the_agent_actually_stopped_still_counts(self):
         screen = "\n".join([f"line {i}" for i in range(12)]
                            + ["you have hit your usage limit"])
