@@ -357,6 +357,33 @@ class LiveTest(unittest.TestCase):
                         "reap reached into a repo the director was not working in")
         self.assertNotIn(theirs, p.stdout)
 
+    def test_reap_covers_every_repo_the_director_has_workers_in(self):
+        # A project can span repositories, so the scope is the fleet's actual
+        # footprint, not just the directory the director happens to be in.
+        second = os.path.join(self.tmp, "second")
+        os.makedirs(second)
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=second,
+                       capture_output=True)
+        with open(os.path.join(second, "f.txt"), "w") as fh:
+            fh.write("x")
+        subprocess.run(["git", "add", "-A"], cwd=second, capture_output=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "-qm", "i"], cwd=second, capture_output=True)
+        wt = os.path.join(second, "elsewhere")
+        subprocess.run(["git", "worktree", "add", "-q", wt, "-b", "w"],
+                       cwd=second, capture_output=True)
+        # A worker recorded against that other repo, as a multi-repo run has.
+        state = self.workers()
+        state["far"] = {"role": "f", "agent": "fake", "task": "t",
+                        "surface": "x", "workspace": "y", "repo": second,
+                        "cwd": wt, "started": 0}
+        with open(self.state, "w") as fh:
+            json.dump(state, fh)
+
+        p = self.crew("reap", "--idle-minutes", "0")
+        self.assertIn(second, p.stdout,
+                      "a repo the director has a worker in was left out of scope")
+
     def test_show_prints_what_a_worker_is_asking(self):
         # status says a worker is waiting. This is how the director finds out
         # what it is waiting for, which is the whole of "surface it to the

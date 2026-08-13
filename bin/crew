@@ -1330,15 +1330,24 @@ def main():
         reaper = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                               "crew-reap")
         rest = sys.argv[2:]
-        # Scoped to the repo you are in unless you say otherwise. crew-reap on
-        # its own sweeps everywhere by design, which is right for a person
-        # running it deliberately and very wrong for a director following the
-        # loop: one did exactly this and reaped 18 worktrees across four other
+        # Scoped to the repos this director is actually working in: the one
+        # you are standing in, plus every repo it has put a worker in, since a
+        # project can span several. crew-reap on its own sweeps the whole
+        # machine by design, which is right for a person running it
+        # deliberately and very wrong for a director following the loop: one
+        # did exactly that and reaped eighteen worktrees across four unrelated
         # projects. Their work survived on branches, but nobody asked for it.
         if not any(a == "--repo" or a.startswith("--repo=") for a in rest):
+            scope = []
             rc, top = run(["git", "rev-parse", "--show-toplevel"])
             if rc == 0 and top:
-                rest = ["--repo", top] + rest
+                scope.append(os.path.realpath(top))
+            for w in workers().values():
+                repo = w.get("repo")
+                if repo and os.path.realpath(repo) not in scope:
+                    scope.append(os.path.realpath(repo))
+            for repo in scope:
+                rest = ["--repo", repo] + rest
         os.execv(reaper, [reaper, *rest])
 
     ap = argparse.ArgumentParser(
