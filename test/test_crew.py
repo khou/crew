@@ -459,6 +459,22 @@ class LaunchTest(unittest.TestCase):
             self.assertIn("planner", cfg["roles"])
             del os.environ["CREW_CONFIG"]
 
+    def test_invalid_config_warns_and_falls_back_to_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "crew.json")
+            with open(path, "w") as fh:
+                fh.write("{not valid json")
+            os.environ["CREW_CONFIG"] = path
+            mod = crew_module()
+            printed = []
+            mod.log = lambda msg="": printed.append(msg)
+            cfg = mod.config()
+            self.assertEqual(cfg["auto_approve"], mod.DEFAULTS["auto_approve"])
+            self.assertTrue(any(path in msg and "warning" in msg
+                                for msg in printed),
+                            f"expected a warning naming {path}, got {printed}")
+            del os.environ["CREW_CONFIG"]
+
     def test_shell_quoting_survives_a_task_with_quotes(self):
         q = self.crew.shell_quote("don't; rm -rf /")
         self.assertEqual(q, """'don'\\''t; rm -rf /'""")

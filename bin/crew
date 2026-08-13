@@ -240,7 +240,12 @@ def save_json(path, data):
 
 def config():
     cfg = dict(DEFAULTS)
-    cfg.update(load_json(CONFIG_PATH, {}))
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH) as fh:
+                cfg.update(json.load(fh))
+        except (OSError, ValueError) as e:
+            log(f"warning: ignoring unreadable {CONFIG_PATH}: {e}")
     agents = {k: dict(v) for k, v in AGENTS.items()}
     for name, override in (cfg.get("agents") or {}).items():
         agents.setdefault(name, {}).update(override)
