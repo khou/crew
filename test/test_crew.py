@@ -1446,6 +1446,73 @@ class StaleWriteKeepsFieldsWrittenSinceTest(unittest.TestCase):
         self.assertEqual(self.crew.workers()["w1"].get("fp"), "abc")
 
 
+class NotifyHookTest(unittest.TestCase):
+    """A worker's notifications must not reach the person.
+
+    cmux raises its own alert when an agent stops for permission, and it is
+    aimed at whoever can unblock it. For a crew worker that is the director,
+    which answers routine requests itself, so the alert pulls the person onto
+    a tab about something already handled.
+    """
+
+    PAYLOAD = {
+        "context": {"appFocused": False, "hookId": "crew-notify"},
+        "effects": {"command": True, "desktop": True, "markUnread": True,
+                    "paneFlash": True, "record": True,
+                    "reorderWorkspace": True, "sound": True},
+        "notification": {"body": "Claude is waiting for your input",
+                         "subtitle": "Waiting", "surfaceId": "worker-surface",
+                         "title": "Claude Code", "workspaceId": "ws"},
+        "version": 1,
+    }
+
+    def setUp(self):
+        self.crew = crew_module()
+        self.tmp = tempfile.mkdtemp(prefix="crew-notify-")
+        self.crew.STATE_PATH = os.path.join(self.tmp, "workers.json")
+        self.crew.put_worker("w1", {"agent": "a", "surface": "worker-surface",
+                                    "workspace": "ws", "role": "r", "task": "t",
+                                    "repo": "", "cwd": "/nonexistent"},
+                             create=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def run_hook(self, raw):
+        out = io.StringIO()
+        with mock.patch.object(self.crew.sys, "stdin", io.StringIO(raw)):
+            with contextlib.redirect_stdout(out):
+                self.crew.cmd_notify_hook(types.SimpleNamespace(), {})
+        return out.getvalue()
+
+    def test_a_workers_alert_stops_interrupting_the_person(self):
+        got = json.loads(self.run_hook(json.dumps(self.PAYLOAD)))
+        for effect in ("desktop", "sound", "paneFlash", "reorderWorkspace"):
+            self.assertFalse(got["effects"][effect],
+                             f"{effect} still fires for a crew worker")
+
+    def test_a_workers_alert_is_still_recorded(self):
+        # Silenced, not hidden. The badge and the feed are how the director
+        # sees a worker wants it without being dragged to the tab.
+        got = json.loads(self.run_hook(json.dumps(self.PAYLOAD)))
+        self.assertTrue(got["effects"]["markUnread"])
+        self.assertTrue(got["effects"]["record"])
+
+    def test_someone_elses_session_is_left_completely_alone(self):
+        # The hook sees every notification on the machine, so touching one
+        # crew did not create would silence the person's own work.
+        payload = json.loads(json.dumps(self.PAYLOAD))
+        payload["notification"]["surfaceId"] = "not-a-worker"
+        got = json.loads(self.run_hook(json.dumps(payload)))
+        self.assertEqual(got, payload)
+
+    def test_input_it_cannot_parse_is_passed_straight_back(self):
+        # Sitting in front of every notification on the machine means a bug
+        # here would break notifications generally. Change nothing instead.
+        self.assertEqual(self.run_hook("not json at all").strip(),
+                         "not json at all")
+
+
 class StopHookTest(unittest.TestCase):
     """A director must not end its turn while a worker is waiting on it.
 

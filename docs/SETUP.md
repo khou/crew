@@ -26,12 +26,23 @@ what reaches you comes from the director. That is the whole point: the
 director is escalated to, and escalates onward, so notifications should come
 from it and not from six workers at once.
 
-One gap remains, and it is not fixed. cmux raises its own
-`agentPermissionPrompt` notification when a worker stops for permission, and
-that selects the worker's workspace, pulling you onto it. crew answers those
-requests itself, so the alert is telling you about something already handled.
-Turning it off is a single global setting, which would silence the same alert
-for your own session, so crew does not suggest it.
+cmux raises its own alert too, separately from the agent's, when a worker
+stops for permission. That one is aimed at whoever can unblock it, which for a
+worker is the director, and the director answers routine requests itself. The
+setting that turns it off is global and would silence your own sessions with
+it, so crew filters instead:
+
+```json
+{ "notifications": { "hooks": [
+    { "id": "crew", "command": "crew notify-hook" } ] } }
+```
+
+`crew notify-hook` reads the notification cmux is about to deliver and, only
+when the surface is one crew opened, turns off the parts that interrupt you:
+the desktop alert, the sound, the pane flash and the sidebar reorder. It
+leaves the unread badge and the feed entry, so a director can still see a
+worker wants it. Every notification crew did not create is passed back exactly
+as it arrived, including anything it cannot parse.
 
 ## Keeping a director on its fleet
 

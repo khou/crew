@@ -849,6 +849,43 @@ def deliver(ws, surface, text, spec):
     return (rc == 0), (out if rc != 0 else "")
 
 
+# What a worker's notification may still do. It is silenced, not hidden: the
+# badge and the feed are how a director sees a worker wants it without the
+# person being pulled onto the tab.
+NOISY_EFFECTS = ("desktop", "sound", "paneFlash", "reorderWorkspace")
+
+
+def cmd_notify_hook(args, cfg):
+    """Quiet crew's own workers in cmux's notification policy.
+
+    cmux raises its own alert when an agent stops for permission, and rightly
+    so: normally the person is the only one who can unblock it. For a worker
+    that is the director, which answers routine requests itself, so the alert
+    drags the person onto a tab about something already handled. Claude's own
+    notification settings do not cover this one; it is cmux's.
+
+    This sits in front of every notification on the machine, so anything it
+    does not recognise is passed back exactly as it arrived. A bug here would
+    otherwise break notifications the person does want.
+    """
+    raw = sys.stdin.read()
+    try:
+        policy = json.loads(raw)
+        surface = (policy.get("notification") or {}).get("surfaceId")
+    except (ValueError, AttributeError):
+        log(raw)
+        return 0
+
+    if surface and surface in {w.get("surface") for w in workers().values()}:
+        effects = policy.get("effects")
+        if isinstance(effects, dict):
+            for name in NOISY_EFFECTS:
+                if name in effects:
+                    effects[name] = False
+    log(json.dumps(policy))
+    return 0
+
+
 # States that want the director. Never "running": a fleet is busy most of the
 # time, and blocking on that would trap the session in its own turn.
 WANTS_DIRECTOR = ("idle", "needsInput", "stalled", "gone")
@@ -1220,11 +1257,15 @@ def cmux_quiet_hint():
         "\n"
         "Workers are tabs in the director's own workspace, so give the "
         "director a workspace of its own and their comings and goings stay "
-        "out of yours. One caveat that is not fixed yet: cmux's own "
-        "\"agentPermissionPrompt\" notification still fires when a worker asks "
-        "permission, and selects that worker's workspace. crew answers those "
-        "requests itself, so the alert is noise, but turning it off is a "
-        "global setting that would also silence your own agent.\n"
+        "out of yours.\n"
+        "\n"
+        "cmux raises its own alert when an agent stops for permission, which "
+        "for a worker is something the director answers itself. To keep those "
+        "off your screen without silencing your own sessions:\n"
+        "  \"notifications\": { \"hooks\": [\n"
+        "      { \"id\": \"crew\", \"command\": \"crew notify-hook\" } ] }\n"
+        "It quiets only surfaces crew opened, and leaves every other "
+        "notification exactly as it found it.\n"
         "\n"
         "To stop a director wandering off while its fleet waits, point your "
         "agent's stop hook at:\n"
@@ -1657,6 +1698,9 @@ def main():
     sub.add_parser("hook", help="answer your agent's stop hook, so you are "
                                "sent back while a worker still needs you")
 
+    sub.add_parser("notify-hook", help="answer cmux's notification hook, so a "
+                                      "worker's alerts stay off your screen")
+
     args = ap.parse_args()
 
     if args.cmd not in ("reap", "install"):
@@ -1670,7 +1714,7 @@ def main():
         "status": cmd_status,
         "wait": cmd_wait, "say": cmd_say, "show": cmd_show, "stop": cmd_stop,
         "merge": cmd_merge, "approve": cmd_approve, "reap": cmd_reap,
-        "hook": cmd_hook,
+        "hook": cmd_hook, "notify-hook": cmd_notify_hook,
     }[args.cmd](args, cfg)
 
 
