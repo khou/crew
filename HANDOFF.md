@@ -6,90 +6,62 @@ session directs others as tabs.
 
 You are the **director**. Read `docs/DIRECTOR.md` and work the loop.
 
-All three suites are green: `test_crew.py` 84, `test_reap.py` 36,
+All three suites are green: `test_crew.py` 93, `test_reap.py` 37,
 `test_live.py` 43. Nothing is uncommitted and no branch is unmerged.
 
-Fifteen defects were found and fixed in the last session, each with a test that
-failed first and was then mutation-checked by breaking the fix and watching the
-test go red again. Most were found by running crew on itself rather than by
-reading it.
+Eighteen defects were found and fixed in the last session, each with a test
+that failed first and was then mutation-checked by breaking the fix and
+watching the test go red again. Most were found by running crew on itself
+rather than by reading it: the worst of them, a live agent's worktree being
+deleted underneath it, happened during the session and was traced from there.
 
-## The job, in order
+## The job
 
-### 1. Workers still interrupt the person. This is the top priority.
+### 1. Wire up the two hooks. Nothing else is outstanding.
 
-`docs/DIRECTOR.md` and `docs/SETUP.md` both promise workers' notifications are
-off. There are three paths and only two are covered.
+Both were built and tested but neither is switched on, because switching them
+on means editing files crew does not own.
 
-- Claude's own notifications: **fixed**. The `quiet_args` on the claude agent
-  were declared in `8ab0848` and never passed to a launch, so the setting was
-  dead config for its whole life. They are on every launch now.
-- cmux's `notifications.agentPermissionPrompt`, default `true`: **not fixed**.
-  This is what drags the person's workspace selection onto a worker every time
-  one asks permission. crew auto-approves those, so the person is being pulled
-  away to look at something crew is about to answer itself.
+**`crew notify-hook`** stops a worker's alerts reaching the person. cmux raises
+its own alert when an agent stops for permission, separate from the agent's own
+(which crew already turns off, since `8ab0848` declared `quiet_args` and
+nothing ever passed them). That alert is aimed at whoever can unblock the
+agent, which for a worker is the director, and the director answers routine
+requests itself. The global setting that disables it would silence the person's
+own sessions too, so this filters instead. In `~/.config/cmux/cmux.json`:
 
-The fix is a cmux notification hook. `notifications.hooks` in
-`~/.config/cmux/cmux.json` takes "a shell command run with notification policy
-JSON on stdin" that returns updated policy JSON on stdout. crew should register
-one at `crew install` that suppresses notifications only for surfaces listed in
-its own state file, leaving every other session's alerts alone.
+```json
+{ "notifications": { "hooks": [
+    { "id": "crew", "command": "crew notify-hook" } ] } }
+```
 
-**The blocker:** the payload shape is undocumented. It is not in the settings
-schema, not in `skills/cmux/SKILL.md`, and not in `cmux docs settings`. Capture
-a real one before writing anything, using a hook that logs stdin and echoes it
-back unchanged. Note that a notification only fires when its workspace is
-**not** the visible one, so the person has to be looking elsewhere while you
-capture. Back up `cmux.json` to a timestamped `.bak` before editing it, as the
-cmux docs require, and put it back afterwards.
+then `cmux reload-config`. Back up `cmux.json` to a timestamped `.bak` first,
+as the cmux docs require. Verified against real captured payloads: a surface
+crew opened comes back with `desktop`, `sound`, `paneFlash` and
+`reorderWorkspace` off and `markUnread`/`record` intact; a surface crew does
+not own comes back byte-identical.
 
-Do not simply set `agentPermissionPrompt` to false. That silences the alert for
-the person's own main agent too, which they do want.
+**`crew hook`** stops a director walking away from its fleet. Point the agent's
+Stop hook at it. It asks for the turn to continue while any worker is idle,
+needs input, has stalled or is gone.
 
-### 2. `crew stop` does not check that the tab actually closed.
+Open design question for the person, not for you to decide alone: `crew
+install` currently only *prints* these, on the stated principle that crew does
+not edit a config it does not own. They asked for the quiet behaviour to be
+crew's default, which pulls the other way.
 
-Proven live, not theoretical. `crew stop` printed `stopped adv-reap, it was
-idle`, dropped the worker record, and neither the tab nor the agent went. A
-later `crew reap --apply` then removed that live agent's worktree, and the
-agent silently re-rooted onto the primary checkout with edit permissions still
-on. The record is the only thing holding the surface id, so dropping it leaves
-nothing able to reach the tab.
+### 2. Known limits, none of them defects
 
-The existing guard only fires when `close-surface` returns non-zero **and** the
-pid is alive. Here it returned success while the surface survived. Success is
-not evidence the tab went, so verify it. Beware the opposite failure: a worker
-whose tab is already gone must still stop cleanly, and stop must not hang.
-
-A worker was given this and produced nothing before it was stopped.
-
-### 3. reap's liveness check.
-
-`process_cwds` captures lsof's exit code and never reads it, while its own
-docstring says a failed check must stop the run or live work gets reaped.
-
-Measured on this machine, do not re-derive: `lsof -d cwd -F n` exits 0 on every
-normal run, and a forced-error run exits 1 while still printing a **complete**
-listing. So the exit code alone cannot tell complete-with-a-warning from
-truncated-because-it-died, and a blanket `rc != 0` would reject good listings.
-Candidate worth testing: lsof should always report the calling process's own
-cwd, so a listing lacking it is untrustworthy whatever the exit code says.
-
-A reviewer rated this below item 2. If no sound check exists, say so and change
-nothing rather than shipping false comfort.
-
-### 4. Workers stop mid-task, every time.
-
-All six workers run in the last session ended their turn early, usually right
-after a long stretch of tool calls, and each needed re-prompting to finish. The
-work was good once they were nudged. Nothing but the director notices this.
-
-The suggested mechanism is a Claude Code `Stop` hook: it fires when the agent
-tries to end its turn, and returning `{"decision": "block", "reason": ...}`
-sends it back to work. A hook that blocks while any worker is `idle`,
-`needsInput`, `stalled` or `gone` makes losing the loop impossible rather than
-something the director is trusted to remember. Two guards it needs: never block
-on `running`, or it traps the session forever, and cap consecutive blocks so a
-wedged worker cannot pin the director.
+- Plan-limit detection has **still never met a real exhaustion event**. The
+  phrases are a reconstruction. A match is a strong hint; a non-match tells you
+  nothing.
+- `crew stop` moves the person's workspace selection when it closes a tab, via
+  `cmux close-surface`. cmux appears to offer no flag for it. Confirm that
+  before attempting anything, and do not paper over it by restoring the
+  selection: that was tried, was worse, and was removed.
+- Rescue paths in a repo's `.crew.json` containing `..` are contained but do
+  not work end to end; `rescue_missing` mishandles them independently of the
+  containment check. Nobody has asked for them to work.
 
 ## How to work
 
