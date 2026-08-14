@@ -923,6 +923,23 @@ def cmd_hook(args, cfg):
     being sent back is always safe.
     """
     all_w = workers()
+    here = os.environ.get("CMUX_WORKSPACE_ID")
+    if os.environ.get("CMUX_SURFACE_ID") in {w.get("surface")
+                                             for w in all_w.values()}:
+        # A worker's own session. Workers cannot see each other and have no
+        # business acting on one another, so this stays out of their way
+        # however it reached them.
+        log("{}")
+        return 0
+    if all_w and here not in {w.get("workspace") for w in all_w.values()}:
+        # Somebody else's session. Installed for an account this sees every
+        # session that person runs, and hauling one of them back to a fleet
+        # it is not running is the interruption crew exists to prevent.
+        # Workers are tabs in their director's workspace, so that is what
+        # says whose fleet this is.
+        log("{}")
+        return 0
+
     waiting = []
     if all_w:
         for name, (state, _w) in sorted(refresh(all_w, hook_sessions(),

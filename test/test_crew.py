@@ -1542,10 +1542,15 @@ class StopHookTest(unittest.TestCase):
                              create=True)
         self.sessions[name] = {"state": state, "pid": os.getpid()}
 
-    def hook(self):
+    def hook(self, **env):
+        # Defaults to a session in the fleet's own workspace, which is where
+        # the director sits: workers are tabs in its workspace.
+        where = {"CMUX_WORKSPACE_ID": "ws", "CMUX_SURFACE_ID": "director"}
+        where.update(env)
         out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            self.crew.cmd_hook(types.SimpleNamespace(), self.cfg)
+        with mock.patch.dict(os.environ, where):
+            with contextlib.redirect_stdout(out):
+                self.crew.cmd_hook(types.SimpleNamespace(), self.cfg)
         return json.loads(out.getvalue())
 
     def test_nothing_waiting_lets_the_turn_end(self):
@@ -1563,6 +1568,23 @@ class StopHookTest(unittest.TestCase):
         self.assertEqual(decision.get("decision"), "block")
         self.assertIn("w1", decision.get("reason", ""),
                       "the reason has to say who, or it is not actionable")
+
+    def test_a_worker_is_never_sent_to_manage_the_fleet(self):
+        # Workers cannot see each other and have no business acting on one
+        # another. If this hook ever reaches a worker's own session, through
+        # inherited settings or a hand-installed one, it must do nothing.
+        self.add("w1", "idle")
+        self.assertEqual(self.hook(CMUX_SURFACE_ID="w1"), {},
+                         "a worker was told to go and mind the fleet")
+
+    def test_a_session_that_is_not_running_this_fleet_is_left_alone(self):
+        # Installed for the person's account this sees every session they
+        # run, and being dragged back to someone else's fleet is the same
+        # interruption crew exists to prevent. Workers are tabs in their
+        # director's workspace, so that workspace is what identifies it.
+        self.add("w1", "idle")
+        self.assertEqual(self.hook(CMUX_WORKSPACE_ID="a-different-workspace"),
+                         {}, "an unrelated session was pulled into the fleet")
 
     def test_a_wedged_worker_cannot_pin_the_director_forever(self):
         # The escape hatch. Without it a worker nothing can fix would keep the
