@@ -1219,6 +1219,7 @@ def worker_dir(name, w, sessions):
     agent, because the worktree is named after the worker.
     """
     repo = w.get("repo") or ""
+    others = set()
     if repo:
         rc, out = run(["git", "-C", repo, "worktree", "list", "--porcelain"])
         if rc == 0:
@@ -1227,7 +1228,16 @@ def worker_dir(name, w, sessions):
                     path = line.split(" ", 1)[1]
                     if os.path.basename(path) == name:
                         return path
-    return sessions.get(w.get("surface"), {}).get("cwd") or w.get("cwd", "")
+                    others.add(os.path.realpath(path))
+    where = sessions.get(w.get("surface"), {}).get("cwd") or w.get("cwd", "")
+    # Agents that make their own worktree are started from the director's
+    # directory, and that is what spawn records. One that dies before creating
+    # it leaves that behind, and handing it back had stop offering to reap and
+    # merge the director out from under itself. A worktree that belongs to
+    # something else is never this worker's, whoever recorded it.
+    if where and os.path.realpath(where) in others:
+        return ""
+    return where
 
 
 def worker_branch(path):

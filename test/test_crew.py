@@ -165,6 +165,16 @@ class WorkerDirTest(unittest.TestCase):
         self.assertEqual(os.path.realpath(self.crew.worker_dir("w1", w, sessions)),
                          os.path.realpath(self.wt))
 
+    def test_a_worker_that_never_made_its_worktree_claims_nobody_elses(self):
+        # Agents that make their own worktree are started from the director's
+        # directory, and that is what spawn records. One that dies before
+        # creating it leaves that on the record, so stop offered to reap and
+        # merge the director out from under itself. Seen live: the suggestion
+        # was `crew reap --apply` against the director's own worktree.
+        w = {"repo": self.repo, "cwd": self.wt}
+        self.assertEqual(self.crew.worker_dir("never-started", w, {}), "",
+                         "a worker claimed a worktree belonging to something else")
+
     def test_the_session_is_used_when_git_knows_no_such_worktree(self):
         w = {"repo": self.repo, "cwd": "/fallback"}
         sessions = {"s": {"cwd": "/from/session"}}
