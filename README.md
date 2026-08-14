@@ -20,23 +20,24 @@ The director is the only thing you talk to. Workers stay quiet.
 
 ## Quick start
 
-**1. Install it.**
+**1. Let an agent install it.**
 
 ```sh
 git clone https://github.com/khou/crew && cd crew
-./bin/crew install
 ```
 
-**2. Check your agents can actually start.**
+Then start `claude`, `codex` or `cursor-agent` in that directory and tell it:
 
-```sh
-crew doctor
-```
+> Install crew. Read `docs/INSTALL.md`.
 
-Every agent should show a version. If one says `(not found)`, install it or
-sign in. Do this once per machine.
+Installing is mostly decisions: which agents you have, what a worker may do
+unattended, how much of your terminal a fleet may touch. It asks about each
+one, changes nothing without a yes, and tells you at the end what it touched.
 
-**3. Open a session in your project and make it the director.**
+If you would rather not, `./bin/crew install` puts crew on PATH and prints the
+rest as advice for you to apply yourself.
+
+**2. Open a session in your project and make it the director.**
 
 Start `claude`, `codex` or `cursor-agent` in the repo you want to work on, and
 tell it:
@@ -88,6 +89,7 @@ or `full`. See [docs/PERMISSIONS.md](docs/PERMISSIONS.md).
 bin/crew             the fleet: spawn, status, wait, say, show, approve,
                      stop, merge, reap
 bin/crew-reap        worktree cleanup, useful on its own
+docs/INSTALL.md      give this to a session to make it the installer
 docs/DIRECTOR.md     give this to a session to make it the director
 docs/SETUP.md        first run in a repo, keeping a fleet out of your way
 docs/PERMISSIONS.md  what a worker may do unattended, and why it stops
