@@ -17,40 +17,53 @@ deleted underneath it, happened during the session and was traced from there.
 
 ## The job
 
-### 1. Wire up the two hooks. Nothing else is outstanding.
+### 1. Make `crew install` an agent session, not a shell command
 
-Both were built and tested but neither is switched on, because switching them
-on means editing files crew does not own.
+The owner's idea, and it is a good one. Today `crew install` puts two files on
+PATH and *prints* advice about settings, on the principle that crew never edits
+a config it does not own. The result is that printed advice does not get
+applied: `docs/SETUP.md` promised workers' notifications were off while the
+code never passed the flags, for a whole feature's lifetime, and nobody caught
+it.
 
-**`crew notify-hook`** stops a worker's alerts reaching the person. cmux raises
-its own alert when an agent stops for permission, separate from the agent's own
-(which crew already turns off, since `8ab0848` declared `quiet_args` and
-nothing ever passed them). That alert is aimed at whoever can unblock the
-agent, which for a worker is the director, and the director answers routine
-requests itself. The global setting that disables it would silence the person's
-own sessions too, so this filters instead. In `~/.config/cmux/cmux.json`:
+Instead, make installing crew something an agent does. crew already has the
+pattern: `docs/DIRECTOR.md` opens with "Point any coding-agent session at this
+file and it becomes the director". A `docs/INSTALL.md` written the same way
+turns a session into an installer that walks the person through each choice,
+explains it, backs the file up, and applies it with consent. The real branches
+are: which agents they have, whether the notification hook goes in, trust per
+repo, and what roles their codebase needs.
 
-```json
-{ "notifications": { "hooks": [
-    { "id": "crew", "command": "crew notify-hook" } ] } }
-```
+Keep `crew install` working headless. Losing the one-liner costs the second
+machine and the scripted setup; the guided path should be what the README
+leads with, not the only way in.
 
-then `cmux reload-config`. Back up `cmux.json` to a timestamped `.bak` first,
-as the cmux docs require. Verified against real captured payloads: a surface
-crew opened comes back with `desktop`, `sound`, `paneFlash` and
-`reorderWorkspace` off and `markUnread`/`record` intact; a surface crew does
-not own comes back byte-identical.
+### 2. Notifications: understood, deliberately not solved
 
-**`crew hook`** stops a director walking away from its fleet. Point the agent's
-Stop hook at it. It asks for the turn to continue while any worker is idle,
-needs input, has stalled or is gone.
+Workers still pull the person's workspace selection when one asks permission.
+The full picture, so nobody re-derives it:
 
-Open design question for the person, not for you to decide alone: `crew
-install` currently only *prints* these, on the stated principle that crew does
-not edit a config it does not own. They asked for the quiet behaviour to be
-crew's default, which pulls the other way.
+- The agent's own notifications are off. `quiet_args` was declared in
+  `8ab0848` and never passed to a launch until this session.
+- cmux raises a **separate** alert, `notifications.agentPermissionPrompt`,
+  default on. That is the one still firing.
+- cmux has no per-surface or per-workspace notification control. Every setting
+  under `notifications` is global, `cmux new-surface` has no notification flag,
+  and `cmux surface` only stores resume metadata.
+- So the only thing that can tell crew's surfaces from the person's is
+  `notifications.hooks`. `crew notify-hook` implements exactly that and is
+  verified against real captured payloads, but it is **not wired up**, because
+  the owner does not want crew depending on hooks.
 
-### 2. Known limits, none of them defects
+The shape that would actually fit is a per-surface notification setting in
+cmux, passed at `new-surface` time, so crew marks the tabs it opens and it
+works for Claude, Codex and Cursor alike. That is a change to cmux, not crew.
+Until then this stays open, knowingly.
+
+Do not "fix" it by turning `agentPermissionPrompt` off globally. That silences
+the person's own sessions, which they use.
+
+### 3. Known limits, none of them defects
 
 - Plan-limit detection has **still never met a real exhaustion event**. The
   phrases are a reconstruction. A match is a strong hint; a non-match tells you

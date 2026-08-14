@@ -44,20 +44,6 @@ leaves the unread badge and the feed entry, so a director can still see a
 worker wants it. Every notification crew did not create is passed back exactly
 as it arrived, including anything it cannot parse.
 
-## Keeping a director on its fleet
-
-Workers stop mid-task and wait. Only the director notices, and a director that
-ends its turn leaves them sitting there. Point your agent's stop hook at:
-
-```sh
-crew hook
-```
-
-It asks for the turn to continue while any worker is idle, needs input, has
-stalled or is gone, naming which, and gets out of the way otherwise. It never
-holds on for a worker that is merely working, and it lets a turn through after
-a few tries so a worker nothing can fix cannot pin the director indefinitely.
-
 ## First run in a repo
 
 Both Claude Code and Codex refuse to work in a directory they have not seen

@@ -17,8 +17,6 @@ than an API key.
   crew merge <worker>      merge a worker's branch into this repo
   crew stop <worker>       close a worker's tab, keeping its work
   crew reap                remove finished worktrees (see crew-reap)
-  crew hook                answer your agent's stop hook, so you are sent
-                           back while a worker still needs you
 
 Nothing here runs in the background. Each command does one thing and exits.
 """
@@ -886,80 +884,6 @@ def cmd_notify_hook(args, cfg):
     return 0
 
 
-# States that want the director. Never "running": a fleet is busy most of the
-# time, and blocking on that would trap the session in its own turn.
-WANTS_DIRECTOR = ("idle", "needsInput", "stalled", "gone")
-
-# How many turns in a row the hook may block before letting one through. A
-# worker nobody can fix would otherwise pin the director indefinitely.
-HOOK_BLOCK_LIMIT = 3
-
-
-def block_count(value=None):
-    """Consecutive turns the stop hook has blocked, read or written.
-
-    Each crew command is its own process, so this has to live on disk. Kept
-    beside the worker state, which is already the fleet's memory.
-    """
-    path = os.path.join(os.path.dirname(STATE_PATH), "hook-blocks")
-    if value is None:
-        try:
-            with open(path) as fh:
-                return int(fh.read().strip() or 0)
-        except (OSError, ValueError):
-            return 0
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as fh:
-        fh.write(str(value))
-
-
-def cmd_hook(args, cfg):
-    """Answer a coding agent's stop hook, so a director cannot walk away.
-
-    Every worker run so far has stopped mid-task at least once and needed
-    telling to carry on, and nothing but the director notices. Wiring this to
-    the agent's Stop hook makes finishing the loop structural rather than
-    something the director has to remember. Interrupting costs nothing, so
-    being sent back is always safe.
-    """
-    all_w = workers()
-    here = os.environ.get("CMUX_WORKSPACE_ID")
-    if os.environ.get("CMUX_SURFACE_ID") in {w.get("surface")
-                                             for w in all_w.values()}:
-        # A worker's own session. Workers cannot see each other and have no
-        # business acting on one another, so this stays out of their way
-        # however it reached them.
-        log("{}")
-        return 0
-    if all_w and here not in {w.get("workspace") for w in all_w.values()}:
-        # Somebody else's session. Installed for an account this sees every
-        # session that person runs, and hauling one of them back to a fleet
-        # it is not running is the interruption crew exists to prevent.
-        # Workers are tabs in their director's workspace, so that is what
-        # says whose fleet this is.
-        log("{}")
-        return 0
-
-    waiting = []
-    if all_w:
-        for name, (state, _w) in sorted(refresh(all_w, hook_sessions(),
-                                                cfg).items()):
-            if state in WANTS_DIRECTOR:
-                waiting.append(f"{name} is {state}")
-
-    if not waiting or block_count() >= HOOK_BLOCK_LIMIT:
-        block_count(0)
-        log("{}")
-        return 0
-
-    block_count(block_count() + 1)
-    log(json.dumps({"decision": "block", "reason":
-                    "Your fleet still needs you: " + ", ".join(waiting)
-                    + ". Read each with `crew show <worker>`, then act. If a "
-                      "worker is finished, stop and reap it."}))
-    return 0
-
-
 def cmd_status(args, cfg):
     sessions = hook_sessions()
     all_w = workers()
@@ -1282,13 +1206,7 @@ def cmux_quiet_hint():
         "  \"notifications\": { \"hooks\": [\n"
         "      { \"id\": \"crew\", \"command\": \"crew notify-hook\" } ] }\n"
         "It quiets only surfaces crew opened, and leaves every other "
-        "notification exactly as it found it.\n"
-        "\n"
-        "To stop a director wandering off while its fleet waits, point your "
-        "agent's stop hook at:\n"
-        "  crew hook\n"
-        "It asks for the turn to continue while any worker is idle, needs "
-        "input, has stalled or is gone, and gets out of the way otherwise.")
+        "notification exactly as it found it.")
 
 
 def worker_dir(name, w, sessions):
@@ -1712,9 +1630,6 @@ def main():
     rp = sub.add_parser("reap", help="remove finished worktrees")
     rp.add_argument("rest", nargs=argparse.REMAINDER)
 
-    sub.add_parser("hook", help="answer your agent's stop hook, so you are "
-                               "sent back while a worker still needs you")
-
     sub.add_parser("notify-hook", help="answer cmux's notification hook, so a "
                                       "worker's alerts stay off your screen")
 
@@ -1731,7 +1646,7 @@ def main():
         "status": cmd_status,
         "wait": cmd_wait, "say": cmd_say, "show": cmd_show, "stop": cmd_stop,
         "merge": cmd_merge, "approve": cmd_approve, "reap": cmd_reap,
-        "hook": cmd_hook, "notify-hook": cmd_notify_hook,
+        "notify-hook": cmd_notify_hook,
     }[args.cmd](args, cfg)
 
 
